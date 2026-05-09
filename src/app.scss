@@ -11,3 +11,13 @@ html, body, #app {
   background: #000;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
+
+/* Taro H5 wrapper elements must be full height */
+.taro_router,
+.taro_page,
+.taro_page > div,
+#app > div,
+#app > div > div {
+  width: 100% !important;
+  height: 100% !important;
+}

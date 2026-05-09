@@ -1,12 +1,10 @@
 const config = {
   projectName: 'web-ar',
   date: '2024-01-01',
-  designWidth: 750,
+  designWidth: 375,
   deviceRatio: {
-    640: 2.34 / 2,
-    750: 1,
-    828: 1.81 / 2,
-    375: 2 / 1
+    375: 1,
+    750: 0.5
   },
   sourceRoot: 'src',
   outputRoot: 'dist',
@@ -41,6 +39,9 @@ const config = {
       })
     },
     postcss: {
+      pxtransform: {
+        enable: false
+      },
       autoprefixer: {
         enable: true,
         config: {}
