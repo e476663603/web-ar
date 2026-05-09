@@ -12,8 +12,8 @@ export default function Index() {
   }
 
   const openTargetImage = () => {
-    // Try local asset first, fallback to unpkg
-    window.open('./assets/ar/target.png', '_blank')
+    // Open the local target image
+    window.open('./assets/ar/card.png', '_blank')
   }
 
   return (

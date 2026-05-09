@@ -25,10 +25,11 @@ export default function ARPage() {
         const THREE = await import('three')
         setProgress(40)
 
-        // Use MindAR from CDN (loaded globally)
-        const MindARThree = (window as any).MINDAR.IMAGE.MindARThree
+        // Import MindAR (installed via npm --ignore-scripts)
+        const mindArModule = await import('mind-ar/dist/mindar-image-three.prod.js')
+        const MindARThree = mindArModule.MindARThree
         if (!MindARThree) {
-          throw new Error('MindAR library not loaded')
+          throw new Error('MindAR library failed to load')
         }
         setProgress(60)
 
@@ -37,7 +38,7 @@ export default function ARPage() {
         // Initialize MindAR
         const mindarThree = new MindARThree({
           container: containerRef.current,
-          imageTargetSrc: 'https://unpkg.com/mind-ar@1.2.5/examples/image-tracking/assets/card-example/card.mind',
+          imageTargetSrc: './assets/ar/card.mind',
           uiLoading: 'no',
           uiScanning: 'no',
           uiError: 'no',
