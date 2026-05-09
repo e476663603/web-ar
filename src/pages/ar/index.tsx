@@ -321,20 +321,50 @@ export default function ARPage() {
       // === Drag State ===
       let modelPlaced = false
       let isDragging = false
-      let dragTouchPos = { x: 0, y: 0 } // Current touch position in screen coords
-      let xrAnchor: any = null
+      let dragTouchPos = { x: w / 2, y: h / 2 }
+      let placingAnchor: any = null // Anchor during placing phase
+      let anchorUpdatePending = false
       const raycaster = new THREE.Raycaster()
       const ndcVec = new THREE.Vector2()
       const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
       const intersectPoint = new THREE.Vector3()
 
-      // Model starts at default position (1.5m ahead, floor level)
+      // Store latest frame for anchor creation
+      let frameRef: any = null
+
+      // Model starts at default position
       model.position.set(0, 0, -1.5)
       model.visible = true
       placementRing.position.set(0, 0.005, -1.5)
       placementRing.visible = true
 
-      // === Touch Handlers for Dragging ===
+      // === Create anchor at model position ===
+      const createAnchorAt = async (x: number, y: number, z: number) => {
+        const threeRefSpace = renderer.xr.getReferenceSpace()
+        if (!threeRefSpace || !frameRef) return null
+        try {
+          const anchorPose = new XRRigidTransform(
+            new DOMPoint(x, y, z, 1),
+            new DOMPoint(0, 0, 0, 1)
+          )
+          const anchor = await frameRef.createAnchor(anchorPose, threeRefSpace)
+          console.log('[WebXR] Anchor created at:', x.toFixed(2), y.toFixed(2), z.toFixed(2))
+          return anchor
+        } catch (e) {
+          console.warn('[WebXR] Anchor creation failed:', e)
+          return null
+        }
+      }
+
+      // Delete old anchor and create new one
+      const reAnchor = async (x: number, y: number, z: number) => {
+        if (placingAnchor) {
+          try { placingAnchor.delete() } catch (e) {}
+        }
+        placingAnchor = await createAnchorAt(x, y, z)
+      }
+
+      // === Touch Handlers ===
       const onTouchStart = (e: TouchEvent) => {
         if (modelPlaced) return
         e.preventDefault()
@@ -355,46 +385,33 @@ export default function ARPage() {
       const onTouchEnd = (e: TouchEvent) => {
         if (!isDragging || modelPlaced) return
         isDragging = false
-        // Finalize placement with XR Anchor
-        finalizePlacement()
+        // DON'T finalize — just re-anchor at current position
+        anchorUpdatePending = true
+        ringMat.color.set(0xfbbf24) // Yellow idle
       }
 
-      // Add touch listeners to overlay (receives events during XR)
       if (overlayEl) {
         overlayEl.addEventListener('touchstart', onTouchStart, { passive: false })
         overlayEl.addEventListener('touchmove', onTouchMove, { passive: false })
         overlayEl.addEventListener('touchend', onTouchEnd, { passive: false })
       }
 
-      // === Finalize: create anchor, lock model ===
+      // === Finalize: confirm button only ===
       const finalizePlacement = async () => {
         if (modelPlaced) return
         modelPlaced = true
         placementRing.visible = false
         setEdgeWarning('')
 
-        const threeRefSpace = renderer.xr.getReferenceSpace()
-
-        // Try creating XR Anchor
-        try {
-          if (frameRef.createAnchor) {
-            const anchorPose = new XRRigidTransform(
-              new DOMPoint(model.position.x, model.position.y, model.position.z, 1),
-              new DOMPoint(model.quaternion.x, model.quaternion.y, model.quaternion.z, model.quaternion.w)
-            )
-            xrAnchor = await frameRef.createAnchor(anchorPose, threeRefSpace)
-            console.log('[WebXR] XR Anchor created at drop position!')
-          }
-        } catch (e) {
-          console.warn('[WebXR] Anchor creation failed, using static position')
-        }
+        // Re-anchor one final time at current position
+        await reAnchor(model.position.x, model.position.y, model.position.z)
 
         setArState('placed')
-        console.log('[WebXR] Model placed at:', model.position.toArray().map((v: number) => v.toFixed(2)))
+        console.log('[WebXR] CONFIRMED at:', model.position.toArray().map((v: number) => v.toFixed(2)))
       }
 
-      // Store latest frame for anchor creation
-      let frameRef: any = null
+      // Expose finalize for confirm button
+      ;(sceneRef as any).finalizePlacement = finalizePlacement
 
       // === Render Loop ===
       renderer.setAnimationLoop((timestamp: number, frame: any) => {
@@ -403,24 +420,29 @@ export default function ARPage() {
 
         const threeRefSpace = renderer.xr.getReferenceSpace()
 
-        // --- Update model from anchor (after placed) ---
-        if (xrAnchor && modelPlaced && threeRefSpace) {
+        // --- Process pending anchor update after drag end ---
+        if (anchorUpdatePending && !isDragging && threeRefSpace) {
+          anchorUpdatePending = false
+          reAnchor(model.position.x, model.position.y, model.position.z)
+        }
+
+        // --- Update model from placing anchor (keeps model stable) ---
+        if (placingAnchor && !isDragging && threeRefSpace) {
           try {
-            const anchorPose = frame.getPose(xrAnchor.anchorSpace, threeRefSpace)
+            const anchorPose = frame.getPose(placingAnchor.anchorSpace, threeRefSpace)
             if (anchorPose) {
               model.position.set(
                 anchorPose.transform.position.x,
                 anchorPose.transform.position.y,
                 anchorPose.transform.position.z
               )
-              model.quaternion.set(
-                anchorPose.transform.orientation.x,
-                anchorPose.transform.orientation.y,
-                anchorPose.transform.orientation.z,
-                anchorPose.transform.orientation.w
+              placementRing.position.set(
+                model.position.x,
+                model.position.y + 0.005,
+                model.position.z
               )
             }
-          } catch (e) { /* anchor unavailable */ }
+          } catch (e) { /* anchor unavailable this frame */ }
         }
 
         // --- Dragging: move model to touch position on floor ---
@@ -431,23 +453,21 @@ export default function ARPage() {
           )
           raycaster.setFromCamera(ndcVec, camera)
 
-          // Intersect ray with floor plane at model's current Y
           floorPlane.set(new THREE.Vector3(0, 1, 0), -model.position.y)
           if (raycaster.ray.intersectPlane(floorPlane, intersectPoint)) {
-            // Smooth follow to avoid jitter
-            model.position.x += (intersectPoint.x - model.position.x) * 0.3
-            model.position.z += (intersectPoint.z - model.position.z) * 0.3
+            model.position.x += (intersectPoint.x - model.position.x) * 0.25
+            model.position.z += (intersectPoint.z - model.position.z) * 0.25
             placementRing.position.x = model.position.x
             placementRing.position.z = model.position.z
           }
 
-          // Also try hit-test to adjust Y (snap to detected surfaces)
+          // Hit-test to adjust Y
           try {
             const hits = frame.getHitTestResults(hitTestSource)
             if (hits.length > 0) {
               const pose = hits[0].getPose(threeRefSpace)
               if (pose && Math.abs(pose.transform.position.y - model.position.y) < 0.5) {
-                model.position.y += (pose.transform.position.y - model.position.y) * 0.2
+                model.position.y += (pose.transform.position.y - model.position.y) * 0.15
                 placementRing.position.y = model.position.y + 0.005
               }
             }
@@ -457,8 +477,8 @@ export default function ARPage() {
         // --- Edge warning ---
         if (!modelPlaced) {
           const screenPos = model.position.clone().project(camera)
-          const sx = (screenPos.x + 1) / 2 // 0..1
-          const sy = (screenPos.y + 1) / 2 // 0..1
+          const sx = (screenPos.x + 1) / 2
+          const sy = (screenPos.y + 1) / 2
           const margin = 0.15
           let edge = ''
           if (sx < margin) edge = 'left'
@@ -466,11 +486,10 @@ export default function ARPage() {
           if (sy < margin) edge = edge ? edge + '-bottom' : 'bottom'
           else if (sy > 1 - margin) edge = edge ? edge + '-top' : 'top'
           setEdgeWarning(edge)
-          // Change ring color when near edge
           if (edge) {
-            ringMat.color.set(0xef4444) // Red
+            ringMat.color.set(0xef4444) // Red near edge
           } else {
-            ringMat.color.set(isDragging ? 0x22c55e : 0xfbbf24) // Green while dragging, yellow idle
+            ringMat.color.set(isDragging ? 0x22c55e : 0xfbbf24)
           }
         }
 
@@ -498,10 +517,11 @@ export default function ARPage() {
           overlayEl.removeEventListener('touchend', onTouchEnd)
         }
         try { hitTestSource?.cancel() } catch (e) {}
-        if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
+        if (placingAnchor) { try { placingAnchor.delete() } catch (e) {} }
       })
 
       sceneRef.current = {
+        finalizePlacement,
         stop: () => {
           if (overlayEl) {
             overlayEl.removeEventListener('touchstart', onTouchStart)
@@ -509,7 +529,7 @@ export default function ARPage() {
             overlayEl.removeEventListener('touchend', onTouchEnd)
           }
           try { hitTestSource?.cancel() } catch (e) {}
-          if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
+          if (placingAnchor) { try { placingAnchor.delete() } catch (e) {} }
           try { session.end() } catch (e) {}
           renderer.dispose()
         }
@@ -595,7 +615,7 @@ export default function ARPage() {
 
         {arState === 'placing' && (
           <div className="ar-placing-hint">
-            <span>拖动模型选择位置 · 松手放置</span>
+            <span>拖动模型选择位置 · 点击下方确认放置</span>
           </div>
         )}
 
@@ -612,9 +632,9 @@ export default function ARPage() {
         {arState === 'placing' && (
           <div className="ar-bottom">
             <div className="confirm-place-btn" onClick={() => {
-              // Trigger finalize via touch end simulation
-              const overlay = document.getElementById('ar-overlay')
-              if (overlay) overlay.dispatchEvent(new TouchEvent('touchend'))
+              if (sceneRef.current?.finalizePlacement) {
+                sceneRef.current.finalizePlacement()
+              }
             }}>
               <span>确认放置</span>
             </div>
