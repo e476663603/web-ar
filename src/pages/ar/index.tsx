@@ -8,6 +8,7 @@ export default function ARPage() {
   const sceneRef = useRef<any>(null)
   const [arState, setArState] = useState<ARState>('loading')
   const [error, setError] = useState('')
+  const [edgeWarning, setEdgeWarning] = useState<string>('')
   const depthTextureRef = useRef<any>(null)
 
   useEffect(() => {
@@ -23,7 +24,6 @@ export default function ARPage() {
 
         console.log('[AR] Starting init...')
 
-        // === Dynamic imports with timeout ===
         const importPromise = Promise.all([
           import('three'),
           import('../../lib/mindar/mindar-image-three.prod.js'),
@@ -40,7 +40,6 @@ export default function ARPage() {
         const MindARThree = mindArModule.MindARThree
         if (!MindARThree) throw new Error('MindAR模块加载失败，请刷新')
 
-        // === Create MindAR (DO NOT pre-load FBX here to avoid blocking) ===
         const mindarThree = new MindARThree({
           container,
           imageTargetSrc: './assets/ar/card.mind',
@@ -50,41 +49,33 @@ export default function ARPage() {
         const { renderer, scene, camera } = mindarThree
         const anchor = mindarThree.addAnchor(0)
 
-        // Lighting
         scene.add(new THREE.AmbientLight(0xffffff, 1.0))
         const dl = new THREE.DirectionalLight(0xffffff, 0.8)
         dl.position.set(1, 2, 1)
         scene.add(dl)
 
-        // Placeholder group for model on anchor
         const modelGroup = new THREE.Group()
         modelGroup.visible = false
         anchor.group.add(modelGroup)
 
-        // Target callbacks
         anchor.onTargetFound = () => {
           if (!isMounted) return
-          console.log('[AR] Target FOUND')
           modelGroup.visible = true
           setArState('detected')
         }
         anchor.onTargetLost = () => {
           if (!isMounted) return
-          console.log('[AR] Target LOST')
           modelGroup.visible = false
           setArState('scanning')
         }
 
-        // === Start MindAR first (opens camera immediately) ===
         console.log('[AR] Starting MindAR...')
         const startTimeout = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('AR相机启动超时(15s)，请刷新重试')), 15000)
         )
         await Promise.race([mindarThree.start(), startTimeout])
         if (!isMounted) return
-        console.log('[AR] MindAR started OK - camera open')
 
-        // Ensure video visible
         const video = container.querySelector('video')
         if (video) {
           video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;'
@@ -92,7 +83,6 @@ export default function ARPage() {
 
         setArState('scanning')
 
-        // Start render loop immediately
         let animId = 0
         const animate = () => {
           renderer.render(scene, camera)
@@ -100,24 +90,19 @@ export default function ARPage() {
         }
         animate()
 
-        // === Load FBX in background (non-blocking) ===
         let preloadedFBX: any = null
         const loadFBX = async () => {
           try {
-            console.log('[AR] Loading FBX in background...')
             const loader = new FBXLoader()
             const fbx: any = await new Promise((resolve, reject) => {
               const timer = setTimeout(() => reject(new Error('FBX timeout')), 10000)
-              loader.load(
-                './assets/ar/test.fbx',
+              loader.load('./assets/ar/test.fbx',
                 (obj: any) => { clearTimeout(timer); resolve(obj) },
                 undefined,
                 (err: any) => { clearTimeout(timer); reject(err) }
               )
             })
-            console.log('[AR] FBX loaded OK')
             fbx.animations = []
-            // Scale and center for preview
             const box = new THREE.Box3().setFromObject(fbx)
             const size = box.getSize(new THREE.Vector3())
             const maxDim = Math.max(size.x, size.y, size.z)
@@ -129,7 +114,6 @@ export default function ARPage() {
             modelGroup.add(fbx)
             preloadedFBX = fbx
           } catch (e: any) {
-            console.warn('[AR] FBX failed, using fallback:', e.message)
             const box = new THREE.Mesh(
               new THREE.BoxGeometry(0.3, 0.3, 0.3),
               new THREE.MeshStandardMaterial({ color: 0x6366f1 })
@@ -138,9 +122,8 @@ export default function ARPage() {
             preloadedFBX = box
           }
         }
-        loadFBX() // Non-blocking
+        loadFBX()
 
-        // Store refs
         sceneRef.current = {
           THREE, container, FBXLoader,
           getPreloaded: () => preloadedFBX,
@@ -150,7 +133,6 @@ export default function ARPage() {
           }
         }
         cleanup = sceneRef.current.stop
-
       } catch (err: any) {
         console.error('[AR] Init error:', err)
         if (isMounted) {
@@ -164,7 +146,6 @@ export default function ARPage() {
     return () => { isMounted = false; if (cleanup) cleanup() }
   }, [])
 
-  // ===== Enter WebXR =====
   const placeModel = async () => {
     const ref = sceneRef.current
     if (!ref) return
@@ -189,11 +170,10 @@ export default function ARPage() {
     await startWebXR(ref.THREE, ref.FBXLoader, container, ref.getPreloaded())
   }
 
-  // ===== WebXR with hit-test + depth occlusion =====
+  // ===== WebXR: Drag-to-place + Depth Occlusion =====
   const startWebXR = async (THREE: any, FBXLoaderClass: any, container: HTMLElement, preloadedFBX: any) => {
     const w = window.innerWidth, h = window.innerHeight
 
-    // Renderer
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -220,14 +200,11 @@ export default function ARPage() {
       let fbx: any
       if (preloadedFBX) {
         fbx = preloadedFBX.clone()
-        console.log('[WebXR] Using preloaded model')
       } else {
-        console.log('[WebXR] Loading FBX fresh...')
         const loader = new FBXLoaderClass()
         fbx = await new Promise<any>((resolve, reject) => {
           const timer = setTimeout(() => reject(new Error('timeout')), 10000)
-          loader.load(
-            './assets/ar/test.fbx',
+          loader.load('./assets/ar/test.fbx',
             (obj: any) => { clearTimeout(timer); resolve(obj) },
             undefined,
             (err: any) => { clearTimeout(timer); reject(err) }
@@ -245,7 +222,6 @@ export default function ARPage() {
       model = new THREE.Group()
       model.add(fbx)
     } catch (e: any) {
-      console.error('[WebXR] Model failed:', e)
       model = new THREE.Mesh(
         new THREE.BoxGeometry(0.2, 0.2, 0.2),
         new THREE.MeshStandardMaterial({ color: 0x6366f1 })
@@ -255,7 +231,14 @@ export default function ARPage() {
     model.visible = false
     scene.add(model)
 
-    // No reticle needed - auto-place
+    // === Placement ring indicator (shown during dragging) ===
+    const ringGeo = new THREE.RingGeometry(0.15, 0.2, 48)
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide, transparent: true, opacity: 0.7 })
+    const placementRing = new THREE.Mesh(ringGeo, ringMat)
+    placementRing.rotation.x = -Math.PI / 2
+    placementRing.position.y = 0.005
+    placementRing.visible = false
+    scene.add(placementRing)
 
     // === Depth Occlusion Shader ===
     const depthOcclusionMaterial = new THREE.ShaderMaterial({
@@ -306,7 +289,7 @@ export default function ARPage() {
     occlusionQuad.visible = false
     scene.add(occlusionQuad)
 
-    // === Start WebXR Session ===
+    // === WebXR Session ===
     const overlayEl = document.getElementById('ar-overlay')
     const sessionInit: any = {
       requiredFeatures: ['hit-test', 'local-floor'],
@@ -327,83 +310,101 @@ export default function ARPage() {
       if ((session as any).depthUsage) {
         depthEnabled = true
         console.log('[WebXR] Depth occlusion enabled')
-      } else {
-        console.log('[WebXR] Depth NOT available')
       }
 
       renderer.xr.setReferenceSpaceType('local-floor')
       await renderer.xr.setSession(session)
 
-      // Use viewer space for hit-test ray (center of screen)
       const viewerSpace = await session.requestReferenceSpace('viewer')
       const hitTestSource = await (session as any).requestHitTestSource!({ space: viewerSpace })
 
+      // === Drag State ===
       let modelPlaced = false
-      let hitCount = 0
-      let xrAnchor: any = null // XR Anchor for persistent tracking
+      let isDragging = false
+      let dragTouchPos = { x: 0, y: 0 } // Current touch position in screen coords
+      let xrAnchor: any = null
+      const raycaster = new THREE.Raycaster()
+      const ndcVec = new THREE.Vector2()
+      const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+      const intersectPoint = new THREE.Vector3()
 
-      // === Auto-place with XR Anchor ===
-      const placeWithAnchor = async (hitResult: any, frame: any) => {
+      // Model starts at default position (1.5m ahead, floor level)
+      model.position.set(0, 0, -1.5)
+      model.visible = true
+      placementRing.position.set(0, 0.005, -1.5)
+      placementRing.visible = true
+
+      // === Touch Handlers for Dragging ===
+      const onTouchStart = (e: TouchEvent) => {
+        if (modelPlaced) return
+        e.preventDefault()
+        isDragging = true
+        const touch = e.touches[0]
+        dragTouchPos = { x: touch.clientX, y: touch.clientY }
+        ringMat.color.set(0x22c55e) // Green while dragging
+        ringMat.opacity = 1.0
+      }
+
+      const onTouchMove = (e: TouchEvent) => {
+        if (!isDragging || modelPlaced) return
+        e.preventDefault()
+        const touch = e.touches[0]
+        dragTouchPos = { x: touch.clientX, y: touch.clientY }
+      }
+
+      const onTouchEnd = (e: TouchEvent) => {
+        if (!isDragging || modelPlaced) return
+        isDragging = false
+        // Finalize placement with XR Anchor
+        finalizePlacement()
+      }
+
+      // Add touch listeners to overlay (receives events during XR)
+      if (overlayEl) {
+        overlayEl.addEventListener('touchstart', onTouchStart, { passive: false })
+        overlayEl.addEventListener('touchmove', onTouchMove, { passive: false })
+        overlayEl.addEventListener('touchend', onTouchEnd, { passive: false })
+      }
+
+      // === Finalize: create anchor, lock model ===
+      const finalizePlacement = async () => {
         if (modelPlaced) return
         modelPlaced = true
-        setArState('placed')
+        placementRing.visible = false
+        setEdgeWarning('')
 
-        // Get Three.js's internal reference space (same coord system as rendering)
         const threeRefSpace = renderer.xr.getReferenceSpace()
-        const pose = hitResult.getPose(threeRefSpace)
 
-        if (pose) {
-          model.position.set(
-            pose.transform.position.x,
-            pose.transform.position.y,
-            pose.transform.position.z
-          )
-          model.quaternion.set(
-            pose.transform.orientation.x,
-            pose.transform.orientation.y,
-            pose.transform.orientation.z,
-            pose.transform.orientation.w
-          )
-        }
-        model.visible = true
-
-        // Create XR Anchor for persistent world-locked tracking
+        // Try creating XR Anchor
         try {
-          if (hitResult.createAnchor) {
-            xrAnchor = await hitResult.createAnchor()
-            console.log('[WebXR] XR Anchor created from hit-test!')
-          } else if (frame.createAnchor && pose) {
-            xrAnchor = await frame.createAnchor(pose.transform, threeRefSpace)
-            console.log('[WebXR] XR Anchor created from frame!')
+          if (frameRef.createAnchor) {
+            const anchorPose = new XRRigidTransform(
+              new DOMPoint(model.position.x, model.position.y, model.position.z, 1),
+              new DOMPoint(model.quaternion.x, model.quaternion.y, model.quaternion.z, model.quaternion.w)
+            )
+            xrAnchor = await frameRef.createAnchor(anchorPose, threeRefSpace)
+            console.log('[WebXR] XR Anchor created at drop position!')
           }
         } catch (e) {
           console.warn('[WebXR] Anchor creation failed, using static position')
         }
 
-        console.log('[WebXR] Model placed, anchor:', !!xrAnchor)
+        setArState('placed')
+        console.log('[WebXR] Model placed at:', model.position.toArray().map((v: number) => v.toFixed(2)))
       }
 
-      // Fallback: place at default position if no surface found
-      const fallbackTimer = setTimeout(() => {
-        if (!modelPlaced) {
-          modelPlaced = true
-          setArState('placed')
-          // Place 1.5m in front, at approximate floor level
-          model.position.set(0, -1.0, -1.5)
-          model.visible = true
-          console.log('[WebXR] Fallback placement (no surface found)')
-        }
-      }, 5000)
+      // Store latest frame for anchor creation
+      let frameRef: any = null
 
       // === Render Loop ===
       renderer.setAnimationLoop((timestamp: number, frame: any) => {
         if (!frame) { renderer.render(scene, camera); return }
+        frameRef = frame
 
-        // Get Three.js's reference space each frame (guaranteed correct coord system)
         const threeRefSpace = renderer.xr.getReferenceSpace()
 
-        // --- Update model position from XR Anchor (if available) ---
-        if (xrAnchor && threeRefSpace) {
+        // --- Update model from anchor (after placed) ---
+        if (xrAnchor && modelPlaced && threeRefSpace) {
           try {
             const anchorPose = frame.getPose(xrAnchor.anchorSpace, threeRefSpace)
             if (anchorPose) {
@@ -419,7 +420,58 @@ export default function ARPage() {
                 anchorPose.transform.orientation.w
               )
             }
-          } catch (e) { /* anchor pose unavailable this frame */ }
+          } catch (e) { /* anchor unavailable */ }
+        }
+
+        // --- Dragging: move model to touch position on floor ---
+        if (isDragging && !modelPlaced) {
+          ndcVec.set(
+            (dragTouchPos.x / w) * 2 - 1,
+            -(dragTouchPos.y / h) * 2 + 1
+          )
+          raycaster.setFromCamera(ndcVec, camera)
+
+          // Intersect ray with floor plane at model's current Y
+          floorPlane.set(new THREE.Vector3(0, 1, 0), -model.position.y)
+          if (raycaster.ray.intersectPlane(floorPlane, intersectPoint)) {
+            // Smooth follow to avoid jitter
+            model.position.x += (intersectPoint.x - model.position.x) * 0.3
+            model.position.z += (intersectPoint.z - model.position.z) * 0.3
+            placementRing.position.x = model.position.x
+            placementRing.position.z = model.position.z
+          }
+
+          // Also try hit-test to adjust Y (snap to detected surfaces)
+          try {
+            const hits = frame.getHitTestResults(hitTestSource)
+            if (hits.length > 0) {
+              const pose = hits[0].getPose(threeRefSpace)
+              if (pose && Math.abs(pose.transform.position.y - model.position.y) < 0.5) {
+                model.position.y += (pose.transform.position.y - model.position.y) * 0.2
+                placementRing.position.y = model.position.y + 0.005
+              }
+            }
+          } catch (e) { /* skip */ }
+        }
+
+        // --- Edge warning ---
+        if (!modelPlaced) {
+          const screenPos = model.position.clone().project(camera)
+          const sx = (screenPos.x + 1) / 2 // 0..1
+          const sy = (screenPos.y + 1) / 2 // 0..1
+          const margin = 0.15
+          let edge = ''
+          if (sx < margin) edge = 'left'
+          else if (sx > 1 - margin) edge = 'right'
+          if (sy < margin) edge = edge ? edge + '-bottom' : 'bottom'
+          else if (sy > 1 - margin) edge = edge ? edge + '-top' : 'top'
+          setEdgeWarning(edge)
+          // Change ring color when near edge
+          if (edge) {
+            ringMat.color.set(0xef4444) // Red
+          } else {
+            ringMat.color.set(isDragging ? 0x22c55e : 0xfbbf24) // Green while dragging, yellow idle
+          }
         }
 
         // --- Depth occlusion ---
@@ -435,34 +487,27 @@ export default function ARPage() {
           } catch (e) { /* skip */ }
         }
 
-        // --- Auto-place on first stable hit ---
-        if (!modelPlaced) {
-          try {
-            const hits = frame.getHitTestResults(hitTestSource)
-            if (hits.length > 0) {
-              hitCount++
-              if (hitCount >= 3) {
-                clearTimeout(fallbackTimer)
-                placeWithAnchor(hits[0], frame)
-                try { hitTestSource.cancel() } catch (e) {}
-              }
-            }
-          } catch (e) { /* skip */ }
-        }
-
         renderer.render(scene, camera)
       })
 
       session.addEventListener('end', () => {
         renderer.setAnimationLoop(null)
-        clearTimeout(fallbackTimer)
+        if (overlayEl) {
+          overlayEl.removeEventListener('touchstart', onTouchStart)
+          overlayEl.removeEventListener('touchmove', onTouchMove)
+          overlayEl.removeEventListener('touchend', onTouchEnd)
+        }
         try { hitTestSource?.cancel() } catch (e) {}
         if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
       })
 
       sceneRef.current = {
         stop: () => {
-          clearTimeout(fallbackTimer)
+          if (overlayEl) {
+            overlayEl.removeEventListener('touchstart', onTouchStart)
+            overlayEl.removeEventListener('touchmove', onTouchMove)
+            overlayEl.removeEventListener('touchend', onTouchEnd)
+          }
           try { hitTestSource?.cancel() } catch (e) {}
           if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
           try { session.end() } catch (e) {}
@@ -476,7 +521,6 @@ export default function ARPage() {
     }
   }
 
-  // Depth updater
   function updateDepthOcclusion(THREE: any, depthInfo: any, material: any, quad: any) {
     const { width, height, data, rawValueToMeters } = depthInfo
     if (!depthTextureRef.current || depthTextureRef.current.image.width !== width) {
@@ -491,7 +535,6 @@ export default function ARPage() {
       depthTextureRef.current.magFilter = THREE.NearestFilter
       depthTextureRef.current.wrapS = THREE.ClampToEdgeWrapping
       depthTextureRef.current.wrapT = THREE.ClampToEdgeWrapping
-      console.log('[Depth] Tex:', width, 'x', height)
     }
     const tex = depthTextureRef.current
     tex.image.data.set(new Uint8Array(data))
@@ -514,10 +557,13 @@ export default function ARPage() {
     Taro.navigateBack()
   }
 
+  // Build edge warning class
+  const edgeClass = edgeWarning ? `edge-warn-${edgeWarning.split('-')[0]}` : ''
+
   return (
     <div className="ar-page">
       <div id="ar-container" className="ar-container" />
-      <div id="ar-overlay" className="ar-overlay">
+      <div id="ar-overlay" className={`ar-overlay ${arState === 'placing' ? 'ar-overlay-draggable' : ''} ${edgeClass}`}>
 
         {arState === 'loading' && (
           <div className="ar-loading-overlay">
@@ -549,23 +595,43 @@ export default function ARPage() {
 
         {arState === 'placing' && (
           <div className="ar-placing-hint">
-            <div className="ar-loading-spinner" style={{ width: '20px', height: '20px', marginBottom: '8px' }} />
-            <span>正在检测环境，请缓慢移动手机...</span>
+            <span>拖动模型选择位置 · 松手放置</span>
           </div>
         )}
 
         <div className="ar-topbar">
           <div className="ar-back-btn" onClick={goBack}>←</div>
+          {arState === 'placing' && (
+            <div className="ar-placing-badge">拖动放置中</div>
+          )}
           {arState === 'placed' && (
-            <div className="ar-locked-badge">已锚定 · 自由走动查看</div>
+            <div className="ar-locked-badge">已锁定 · 可走近查看</div>
           )}
         </div>
+
+        {arState === 'placing' && (
+          <div className="ar-bottom">
+            <div className="confirm-place-btn" onClick={() => {
+              // Trigger finalize via touch end simulation
+              const overlay = document.getElementById('ar-overlay')
+              if (overlay) overlay.dispatchEvent(new TouchEvent('touchend'))
+            }}>
+              <span>确认放置</span>
+            </div>
+          </div>
+        )}
 
         {arState === 'placed' && (
           <div className="ar-bottom">
             <div className="rescan-btn" onClick={rescan}><span>重新放置</span></div>
           </div>
         )}
+
+        {/* Edge warning glow */}
+        <div className={`edge-glow edge-left ${edgeWarning.includes('left') ? 'active' : ''}`} />
+        <div className={`edge-glow edge-right ${edgeWarning.includes('right') ? 'active' : ''}`} />
+        <div className={`edge-glow edge-top ${edgeWarning.includes('top') ? 'active' : ''}`} />
+        <div className={`edge-glow edge-bottom ${edgeWarning.includes('bottom') ? 'active' : ''}`} />
 
         {arState === 'error' && (
           <div className="ar-error">

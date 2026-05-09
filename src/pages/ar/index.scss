@@ -1,9 +1,7 @@
 .ar-page {
   position: fixed !important;
-  top: 0 !important;
-  left: 0 !important;
-  width: 100vw !important;
-  height: 100vh !important;
+  top: 0 !important; left: 0 !important;
+  width: 100vw !important; height: 100vh !important;
   overflow: hidden !important;
   background: #000 !important;
   z-index: 9999;
@@ -11,10 +9,8 @@
 
 .ar-container {
   position: absolute !important;
-  top: 0 !important;
-  left: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
+  top: 0 !important; left: 0 !important;
+  width: 100% !important; height: 100% !important;
   overflow: hidden !important;
 }
 
@@ -26,14 +22,18 @@
   & > * { pointer-events: auto; }
 }
 
+/* During placing, overlay receives touch for drag */
+.ar-overlay-draggable {
+  pointer-events: auto !important;
+  touch-action: none; /* Prevent scrolling */
+}
+
 /* Force MindAR elements visible */
 .ar-container video,
 .ar-container canvas {
   position: absolute !important;
-  top: 0 !important;
-  left: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
+  top: 0 !important; left: 0 !important;
+  width: 100% !important; height: 100% !important;
   object-fit: cover !important;
   display: block !important;
 }
@@ -92,12 +92,18 @@
   display: flex; align-items: center; justify-content: center;
   color: #fff; font-size: 16px;
   border: 1px solid rgba(255,255,255,0.15); cursor: pointer;
+  pointer-events: auto;
 }
 .ar-locked-badge {
   padding: 5px 12px; border-radius: 14px;
   background: rgba(34,197,94,0.2); border: 1px solid rgba(34,197,94,0.4);
   color: #22c55e; font-size: 11px; font-weight: 500;
   max-width: 70%; text-align: center;
+}
+.ar-placing-badge {
+  padding: 5px 12px; border-radius: 14px;
+  background: rgba(251,191,36,0.2); border: 1px solid rgba(251,191,36,0.4);
+  color: #fbbf24; font-size: 11px; font-weight: 500;
 }
 
 /* Bottom */
@@ -110,8 +116,19 @@
   padding: 12px 28px; border-radius: 24px;
   background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
   color: rgba(255,255,255,0.9); font-size: 14px; font-weight: 500; cursor: pointer;
+  pointer-events: auto;
 }
 .rescan-btn:active { transform: scale(0.95); background: rgba(255,255,255,0.15); }
+
+.confirm-place-btn {
+  padding: 14px 40px; border-radius: 28px;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  box-shadow: 0 4px 20px rgba(34,197,94,0.4);
+  color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  pointer-events: auto;
+  animation: popIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.confirm-place-btn:active { transform: scale(0.93); }
 
 /* Detected overlay */
 .ar-detected-overlay {
@@ -152,6 +169,7 @@
 .error-btn {
   padding: 10px 24px; background: #6366f1; color: #fff;
   border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+  pointer-events: auto;
 }
 
 /* Placing hint */
@@ -164,5 +182,34 @@
   color: #fff; font-size: 13px; font-weight: 500;
   white-space: nowrap;
   animation: fadeIn 0.3s ease;
+  pointer-events: none;
 }
 @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+
+/* ===== Edge Warning Glow ===== */
+.edge-glow {
+  position: fixed; z-index: 90;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.edge-glow.active {
+  opacity: 1;
+}
+
+.edge-left {
+  top: 0; left: 0; bottom: 0; width: 60px;
+  background: linear-gradient(to right, rgba(239,68,68,0.6), transparent);
+}
+.edge-right {
+  top: 0; right: 0; bottom: 0; width: 60px;
+  background: linear-gradient(to left, rgba(239,68,68,0.6), transparent);
+}
+.edge-top {
+  top: 0; left: 0; right: 0; height: 60px;
+  background: linear-gradient(to bottom, rgba(239,68,68,0.6), transparent);
+}
+.edge-bottom {
+  bottom: 0; left: 0; right: 0; height: 60px;
+  background: linear-gradient(to top, rgba(239,68,68,0.6), transparent);
+}
