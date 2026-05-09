@@ -8,6 +8,7 @@ export default function ARPage() {
   const sceneRef = useRef<any>(null)
   const [arState, setArState] = useState<ARState>('loading')
   const [error, setError] = useState('')
+  const depthTextureRef = useRef<any>(null)
 
   useEffect(() => {
     let isMounted = true
@@ -20,103 +21,78 @@ export default function ARPage() {
         container.style.width = window.innerWidth + 'px'
         container.style.height = window.innerHeight + 'px'
 
-        // Load Three.js + MindAR + FBXLoader
-        const [THREE, mindArModule] = await Promise.all([
+        console.log('[AR] Starting init...')
+
+        // === Dynamic imports with timeout ===
+        const importPromise = Promise.all([
           import('three'),
-          import('../../lib/mindar/mindar-image-three.prod.js')
+          import('../../lib/mindar/mindar-image-three.prod.js'),
+          import('three/examples/jsm/loaders/FBXLoader.js')
         ])
+        const importTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('模块加载超时，请检查网络后刷新')), 20000)
+        )
+        const [THREE, mindArModule, fbxModule] = await Promise.race([importPromise, importTimeout]) as any[]
         if (!isMounted) return
+        console.log('[AR] Modules loaded')
 
-        const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js')
+        const { FBXLoader } = fbxModule
         const MindARThree = mindArModule.MindARThree
-        if (!MindARThree) throw new Error('MindAR load failed')
+        if (!MindARThree) throw new Error('MindAR模块加载失败，请刷新')
 
-        // Pre-load FBX model (reuse for both phases)
-        let preloadedFBX: any = null
-        const basePath = document.baseURI.replace(/\/[^/]*$/, '/')
-        const fbxUrl = basePath + 'assets/ar/test.fbx'
-        console.log('[AR] Loading FBX from:', fbxUrl)
-
-        try {
-          const loader = new FBXLoader()
-          preloadedFBX = await new Promise<any>((resolve, reject) => {
-            loader.load(
-              fbxUrl,
-              (fbx: any) => { console.log('[AR] FBX loaded OK'); resolve(fbx) },
-              (progress: any) => { console.log('[AR] FBX loading...', progress.loaded) },
-              (err: any) => { console.error('[AR] FBX load error:', err); reject(err) }
-            )
-          })
-          // Remove animations
-          if (preloadedFBX.animations) preloadedFBX.animations = []
-        } catch (e: any) {
-          console.warn('[AR] FBX load failed, using fallback box:', e.message)
-          preloadedFBX = null
-        }
-
-        // ===== Phase 1: MindAR image recognition =====
+        // === Create MindAR (DO NOT pre-load FBX here to avoid blocking) ===
         const mindarThree = new MindARThree({
           container,
-          imageTargetSrc: basePath + 'assets/ar/card.mind',
+          imageTargetSrc: './assets/ar/card.mind',
           uiLoading: 'no', uiScanning: 'no', uiError: 'no',
         })
 
         const { renderer, scene, camera } = mindarThree
         const anchor = mindarThree.addAnchor(0)
 
-        // Simple lighting for preview
+        // Lighting
         scene.add(new THREE.AmbientLight(0xffffff, 1.0))
         const dl = new THREE.DirectionalLight(0xffffff, 0.8)
         dl.position.set(1, 2, 1)
         scene.add(dl)
 
-        // Create preview model on anchor
-        let modelGroup: any
-        if (preloadedFBX) {
-          const previewFBX = preloadedFBX.clone()
-          const box = new THREE.Box3().setFromObject(previewFBX)
-          const size = box.getSize(new THREE.Vector3())
-          const maxDim = Math.max(size.x, size.y, size.z)
-          const scale = 0.5 / maxDim
-          previewFBX.scale.setScalar(scale)
-          // Center on anchor
-          const newBox = new THREE.Box3().setFromObject(previewFBX)
-          const center = newBox.getCenter(new THREE.Vector3())
-          previewFBX.position.sub(center)
-          modelGroup = new THREE.Group()
-          modelGroup.add(previewFBX)
-        } else {
-          // Fallback: colored box
-          modelGroup = new THREE.Mesh(
-            new THREE.BoxGeometry(0.3, 0.3, 0.3),
-            new THREE.MeshStandardMaterial({ color: 0x6366f1 })
-          )
-        }
-
+        // Placeholder group for model on anchor
+        const modelGroup = new THREE.Group()
         modelGroup.visible = false
         anchor.group.add(modelGroup)
 
+        // Target callbacks
         anchor.onTargetFound = () => {
           if (!isMounted) return
-          console.log('[AR] Target found - showing preview')
+          console.log('[AR] Target FOUND')
           modelGroup.visible = true
           setArState('detected')
         }
         anchor.onTargetLost = () => {
           if (!isMounted) return
+          console.log('[AR] Target LOST')
           modelGroup.visible = false
           setArState('scanning')
         }
 
-        await mindarThree.start()
+        // === Start MindAR first (opens camera immediately) ===
+        console.log('[AR] Starting MindAR...')
+        const startTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('AR相机启动超时(15s)，请刷新重试')), 15000)
+        )
+        await Promise.race([mindarThree.start(), startTimeout])
         if (!isMounted) return
+        console.log('[AR] MindAR started OK - camera open')
 
-        // Ensure video is visible
+        // Ensure video visible
         const video = container.querySelector('video')
-        if (video) video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;'
+        if (video) {
+          video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;'
+        }
 
         setArState('scanning')
 
+        // Start render loop immediately
         let animId = 0
         const animate = () => {
           renderer.render(scene, camera)
@@ -124,14 +100,63 @@ export default function ARPage() {
         }
         animate()
 
+        // === Load FBX in background (non-blocking) ===
+        let preloadedFBX: any = null
+        const loadFBX = async () => {
+          try {
+            console.log('[AR] Loading FBX in background...')
+            const loader = new FBXLoader()
+            const fbx: any = await new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error('FBX timeout')), 10000)
+              loader.load(
+                './assets/ar/test.fbx',
+                (obj: any) => { clearTimeout(timer); resolve(obj) },
+                undefined,
+                (err: any) => { clearTimeout(timer); reject(err) }
+              )
+            })
+            console.log('[AR] FBX loaded OK')
+            fbx.animations = []
+            // Scale and center for preview
+            const box = new THREE.Box3().setFromObject(fbx)
+            const size = box.getSize(new THREE.Vector3())
+            const maxDim = Math.max(size.x, size.y, size.z)
+            const scale = 0.5 / maxDim
+            fbx.scale.setScalar(scale)
+            const newBox = new THREE.Box3().setFromObject(fbx)
+            const center = newBox.getCenter(new THREE.Vector3())
+            fbx.position.sub(center)
+            modelGroup.add(fbx)
+            preloadedFBX = fbx
+          } catch (e: any) {
+            console.warn('[AR] FBX failed, using fallback:', e.message)
+            const box = new THREE.Mesh(
+              new THREE.BoxGeometry(0.3, 0.3, 0.3),
+              new THREE.MeshStandardMaterial({ color: 0x6366f1 })
+            )
+            modelGroup.add(box)
+            preloadedFBX = box
+          }
+        }
+        loadFBX() // Non-blocking
+
+        // Store refs
         sceneRef.current = {
-          THREE, container, FBXLoader, preloadedFBX, fbxUrl,
-          stop: () => { cancelAnimationFrame(animId); try { mindarThree.stop() } catch (e) {} }
+          THREE, container, FBXLoader,
+          getPreloaded: () => preloadedFBX,
+          stop: () => {
+            cancelAnimationFrame(animId)
+            try { mindarThree.stop() } catch (e) {}
+          }
         }
         cleanup = sceneRef.current.stop
+
       } catch (err: any) {
         console.error('[AR] Init error:', err)
-        if (isMounted) { setArState('error'); setError(err.message || '初始化失败') }
+        if (isMounted) {
+          setArState('error')
+          setError(err.message || '初始化失败')
+        }
       }
     }
 
@@ -161,14 +186,14 @@ export default function ARPage() {
     container.innerHTML = ''
 
     setArState('placing')
-    await startWebXR(ref.THREE, ref.FBXLoader, container, ref.preloadedFBX, ref.fbxUrl)
+    await startWebXR(ref.THREE, ref.FBXLoader, container, ref.getPreloaded())
   }
 
   // ===== WebXR with hit-test + depth occlusion =====
-  const startWebXR = async (THREE: any, FBXLoaderClass: any, container: HTMLElement, preloadedFBX: any, fbxUrl: string) => {
+  const startWebXR = async (THREE: any, FBXLoaderClass: any, container: HTMLElement, preloadedFBX: any) => {
     const w = window.innerWidth, h = window.innerHeight
 
-    // === Renderer (NO shadows) ===
+    // Renderer
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -180,7 +205,7 @@ export default function ARPage() {
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 100)
 
-    // === Lighting (no shadows) ===
+    // Lighting
     scene.add(new THREE.AmbientLight(0xffffff, 0.8))
     const mainLight = new THREE.DirectionalLight(0xffffff, 1.2)
     mainLight.position.set(0.5, 3, 1)
@@ -189,47 +214,48 @@ export default function ARPage() {
     fillLight.position.set(-1, 1, -1)
     scene.add(fillLight)
 
-    // === Load/Clone FBX Model ===
+    // === Model ===
     let model: any
     try {
       let fbx: any
       if (preloadedFBX) {
         fbx = preloadedFBX.clone()
-        console.log('[WebXR] Using preloaded FBX clone')
+        console.log('[WebXR] Using preloaded model')
       } else {
-        console.log('[WebXR] Loading FBX fresh from:', fbxUrl)
+        console.log('[WebXR] Loading FBX fresh...')
         const loader = new FBXLoaderClass()
         fbx = await new Promise<any>((resolve, reject) => {
-          loader.load(fbxUrl, resolve, undefined, reject)
+          const timer = setTimeout(() => reject(new Error('timeout')), 10000)
+          loader.load(
+            './assets/ar/test.fbx',
+            (obj: any) => { clearTimeout(timer); resolve(obj) },
+            undefined,
+            (err: any) => { clearTimeout(timer); reject(err) }
+          )
         })
         fbx.animations = []
       }
-
       const box = new THREE.Box3().setFromObject(fbx)
       const size = box.getSize(new THREE.Vector3())
       const maxDim = Math.max(size.x, size.y, size.z)
       const scale = 0.4 / maxDim
       fbx.scale.setScalar(scale)
-      // Bottom at y=0 (sits on surface)
       const newBox = new THREE.Box3().setFromObject(fbx)
       fbx.position.y -= newBox.min.y
-
       model = new THREE.Group()
       model.add(fbx)
-      console.log('[WebXR] Model ready, scale:', scale)
     } catch (e: any) {
-      console.error('[WebXR] Model load failed:', e)
+      console.error('[WebXR] Model failed:', e)
       model = new THREE.Mesh(
         new THREE.BoxGeometry(0.2, 0.2, 0.2),
         new THREE.MeshStandardMaterial({ color: 0x6366f1 })
       )
       model.position.y = 0.1
     }
-
     model.visible = false
     scene.add(model)
 
-    // === Reticle (placement indicator) ===
+    // === Reticle ===
     const reticle = new THREE.Mesh(
       new THREE.RingGeometry(0.08, 0.1, 32),
       new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide })
@@ -238,7 +264,7 @@ export default function ARPage() {
     reticle.visible = false
     scene.add(reticle)
 
-    // === Depth Occlusion Quad (renders first, writes depth only) ===
+    // === Depth Occlusion Shader ===
     const depthOcclusionMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uDepthTexture: { value: null },
@@ -258,26 +284,17 @@ export default function ARPage() {
         uniform float uRawValueToMeters;
         uniform mat4 uUvTransform;
         varying vec2 vUv;
-
         void main() {
-          // Transform UV using depth normalization matrix
           vec4 tUv = uUvTransform * vec4(vUv, 0.0, 1.0);
           vec2 depthUv = tUv.xy;
-
-          // Sample depth (luminance-alpha: low byte=r, high byte=g)
           vec4 d = texture2D(uDepthTexture, depthUv);
           float depthM = (d.r * 255.0 + d.g * 255.0 * 256.0) * uRawValueToMeters;
-
-          // Discard invalid depth
-          if (depthM < 0.1 || depthM > 15.0) discard;
-
-          // Convert to normalized device depth [0,1]
-          // Perspective depth: z_ndc = (f*(z-n)) / (z*(f-n))
+          if (depthM < 0.1 || depthM > 20.0) discard;
           float near = 0.01;
           float far = 100.0;
           float ndcZ = (far * (depthM - near)) / (depthM * (far - near));
           gl_FragDepth = ndcZ;
-          gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+          gl_FragColor = vec4(0.0);
         }
       `,
       depthWrite: true,
@@ -292,13 +309,9 @@ export default function ARPage() {
       depthOcclusionMaterial
     )
     occlusionQuad.frustumCulled = false
-    occlusionQuad.renderOrder = -1 // Render before everything
-    occlusionQuad.visible = false // Hidden until depth is available
+    occlusionQuad.renderOrder = -1
+    occlusionQuad.visible = false
     scene.add(occlusionQuad)
-
-    // === Depth Data Texture (for CPU depth upload) ===
-    let depthDataTexture: any = null
-    let depthEnabled = false
 
     // === Start WebXR Session ===
     const overlayEl = document.getElementById('ar-overlay')
@@ -317,25 +330,23 @@ export default function ARPage() {
     try {
       const session = await navigator.xr!.requestSession('immersive-ar', sessionInit)
 
-      // Check if depth-sensing is available
+      let depthEnabled = false
       if ((session as any).depthUsage) {
         depthEnabled = true
-        console.log('[WebXR] Depth sensing enabled:', (session as any).depthUsage, (session as any).depthDataFormat)
+        console.log('[WebXR] Depth occlusion enabled')
       } else {
-        console.log('[WebXR] Depth sensing NOT available - no occlusion')
+        console.log('[WebXR] Depth NOT available')
       }
 
       renderer.xr.setReferenceSpaceType('local-floor')
       await renderer.xr.setSession(session)
 
-      // Reference spaces
       const refSpace = await session.requestReferenceSpace('local-floor')
       const viewerSpace = await session.requestReferenceSpace('viewer')
       const hitTestSource = await (session as any).requestHitTestSource!({ space: viewerSpace })
 
       let modelPlaced = false
 
-      // Tap to place model
       session.addEventListener('select', () => {
         if (modelPlaced) return
         if (reticle.visible) {
@@ -344,53 +355,51 @@ export default function ARPage() {
           reticle.visible = false
           modelPlaced = true
           setArState('placed')
-          console.log('[WebXR] Model placed at:', model.position.toArray())
+          console.log('[WebXR] Placed at:', model.position.toArray())
         }
       })
 
-      // === Render Loop ===
+      // Render loop
       renderer.setAnimationLoop((timestamp: number, frame: any) => {
         if (!frame) { renderer.render(scene, camera); return }
 
-        // --- Depth Occlusion Update ---
+        // Depth occlusion
         if (depthEnabled && modelPlaced) {
           try {
             const pose = frame.getViewerPose(refSpace)
             if (pose && pose.views.length > 0) {
-              const view = pose.views[0]
-              const depthInfo = frame.getDepthInformation(view)
+              const depthInfo = frame.getDepthInformation(pose.views[0])
               if (depthInfo) {
                 updateDepthOcclusion(THREE, depthInfo, depthOcclusionMaterial, occlusionQuad)
               }
             }
-          } catch (e) {
-            // Depth not available this frame, skip
-          }
+          } catch (e) { /* skip */ }
         }
 
-        // --- Hit-test for reticle ---
+        // Hit-test
         if (!modelPlaced) {
-          const hitTestResults = frame.getHitTestResults(hitTestSource)
-          if (hitTestResults.length > 0) {
-            const hit = hitTestResults[0]
-            const pose = hit.getPose(refSpace)
-            if (pose) {
-              reticle.visible = true
-              reticle.position.set(
-                pose.transform.position.x,
-                pose.transform.position.y,
-                pose.transform.position.z
-              )
-              reticle.quaternion.set(
-                pose.transform.orientation.x,
-                pose.transform.orientation.y,
-                pose.transform.orientation.z,
-                pose.transform.orientation.w
-              )
+          try {
+            const hits = frame.getHitTestResults(hitTestSource)
+            if (hits.length > 0) {
+              const pose = hits[0].getPose(refSpace)
+              if (pose) {
+                reticle.visible = true
+                reticle.position.set(
+                  pose.transform.position.x,
+                  pose.transform.position.y,
+                  pose.transform.position.z
+                )
+                reticle.quaternion.set(
+                  pose.transform.orientation.x,
+                  pose.transform.orientation.y,
+                  pose.transform.orientation.z,
+                  pose.transform.orientation.w
+                )
+              }
+            } else {
+              reticle.visible = false
             }
-          } else {
-            reticle.visible = false
-          }
+          } catch (e) { /* skip */ }
         }
 
         renderer.render(scene, camera)
@@ -409,22 +418,17 @@ export default function ARPage() {
         }
       }
     } catch (err: any) {
-      console.error('[WebXR] Session error:', err)
+      console.error('[WebXR] Error:', err)
       setError('WebXR启动失败: ' + err.message)
       setArState('error')
     }
   }
 
-  // === Depth Occlusion Updater ===
-  const depthTextureRef = useRef<any>(null)
-
+  // Depth updater
   function updateDepthOcclusion(THREE: any, depthInfo: any, material: any, quad: any) {
     const { width, height, data, rawValueToMeters } = depthInfo
-
-    // Create or resize DataTexture
-    if (!depthTextureRef.current || depthTextureRef.current.image.width !== width || depthTextureRef.current.image.height !== height) {
+    if (!depthTextureRef.current || depthTextureRef.current.image.width !== width) {
       if (depthTextureRef.current) depthTextureRef.current.dispose()
-      // luminance-alpha data: 2 bytes per pixel → store as RG texture
       depthTextureRef.current = new THREE.DataTexture(
         new Uint8Array(width * height * 2),
         width, height,
@@ -435,25 +439,16 @@ export default function ARPage() {
       depthTextureRef.current.magFilter = THREE.NearestFilter
       depthTextureRef.current.wrapS = THREE.ClampToEdgeWrapping
       depthTextureRef.current.wrapT = THREE.ClampToEdgeWrapping
-      console.log('[Depth] Created depth texture:', width, 'x', height)
+      console.log('[Depth] Tex:', width, 'x', height)
     }
-
-    // Upload raw depth bytes
     const tex = depthTextureRef.current
-    const srcArray = new Uint8Array(data)
-    tex.image.data.set(srcArray)
+    tex.image.data.set(new Uint8Array(data))
     tex.needsUpdate = true
-
-    // Update shader uniforms
     material.uniforms.uDepthTexture.value = tex
     material.uniforms.uRawValueToMeters.value = rawValueToMeters
-
-    // UV transform from depth info
     if (depthInfo.normDepthBufferFromNormView) {
-      const m = depthInfo.normDepthBufferFromNormView.matrix
-      material.uniforms.uUvTransform.value.fromArray(m)
+      material.uniforms.uUvTransform.value.fromArray(depthInfo.normDepthBufferFromNormView.matrix)
     }
-
     quad.visible = true
   }
 
@@ -475,7 +470,7 @@ export default function ARPage() {
         {arState === 'loading' && (
           <div className="ar-loading-overlay">
             <div className="ar-loading-spinner" />
-            <span className="ar-loading-text">正在启动...</span>
+            <span className="ar-loading-text">正在启动相机...</span>
           </div>
         )}
 
@@ -509,7 +504,7 @@ export default function ARPage() {
         <div className="ar-topbar">
           <div className="ar-back-btn" onClick={goBack}>←</div>
           {arState === 'placed' && (
-            <div className="ar-locked-badge">已锚定 · 真实深度遮挡</div>
+            <div className="ar-locked-badge">已锚定 · 深度遮挡</div>
           )}
         </div>
 
@@ -522,7 +517,8 @@ export default function ARPage() {
         {arState === 'error' && (
           <div className="ar-error">
             <span className="error-text">{error}</span>
-            <div className="error-btn" onClick={goBack}>返回</div>
+            <div className="error-btn" onClick={() => window.location.reload()}>刷新重试</div>
+            <div className="error-btn" onClick={goBack} style={{ marginTop: '8px', background: 'transparent', border: '1px solid rgba(255,255,255,0.3)' }}>返回</div>
           </div>
         )}
       </div>
