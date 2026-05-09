@@ -8,16 +8,17 @@ export default function ARPage() {
   const mindarRef = useRef<any>(null)
   const modelGroupRef = useRef<any>(null)
   const animationIdRef = useRef<number>(0)
-  const lockedSceneRef = useRef<any>(null)
+  const xrSessionRef = useRef<any>(null)
   const [arState, setArState] = useState<ARState>('loading')
   const [error, setError] = useState<string | null>(null)
+  const [mode, setMode] = useState<'webxr' | 'mindar' | ''>('')
 
   useEffect(() => {
     let isMounted = true
 
     const initAR = async () => {
       try {
-        // Pre-request camera permission for faster startup
+        // Pre-request camera
         const preStream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment' }
         })
@@ -59,7 +60,7 @@ export default function ARPage() {
         scene.add(dirLight)
         scene.add(new THREE.PointLight(0x8b5cf6, 1, 10))
 
-        // 3D Model - attached to anchor, visible immediately on detection
+        // 3D Model on anchor - has natural perspective from MindAR tracking
         const anchor = mindarThree.addAnchor(0)
         const modelGroup = createModel(THREE)
         modelGroupRef.current = modelGroup
@@ -74,15 +75,13 @@ export default function ARPage() {
         }
         anchor.onTargetLost = () => {
           if (!isMounted) return
-          // Keep model visible even when target lost - user can preview position
-          // Model stays visible so user can see where it will lock
-          setArState(prev => prev === 'detected' ? 'scanning' : prev)
+          // Keep model visible briefly - don't immediately hide
         }
 
         // Start MindAR
         await mindarThree.start()
 
-        // Fix video
+        // Fix video display
         const video = container.querySelector('video')
         if (video) {
           video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;'
@@ -109,54 +108,65 @@ export default function ARPage() {
     return () => {
       isMounted = false
       if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current)
-      if (mindarRef.current) { try { mindarRef.current.stop() } catch(e) {} }
-      if (lockedSceneRef.current) { lockedSceneRef.current.cleanup() }
+      if (mindarRef.current) { try { mindarRef.current.stop() } catch (e) {} }
+      if (xrSessionRef.current) { try { xrSessionRef.current.end() } catch (e) {} }
     }
   }, [])
 
-  // Lock: stop MindAR -> switch to gyro-tracked camera with model fixed in space
+  // Lock model: try WebXR for real 6DOF, fallback to MindAR continuous tracking
   const lockModel = async () => {
-    setArState('locked')
     try {
-      const container = document.getElementById('ar-container')
-      if (mindarRef.current) { mindarRef.current.stop(); mindarRef.current = null }
-      if (animationIdRef.current) { cancelAnimationFrame(animationIdRef.current); animationIdRef.current = 0 }
-      if (container) container.innerHTML = ''
+      // Check if WebXR AR is supported (Android Chrome with ARCore)
+      let xrSupported = false
+      if (navigator.xr) {
+        xrSupported = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false)
+      }
 
-      const THREE = await import('three')
-      await startLockedScene(THREE, container!)
+      if (xrSupported) {
+        // WebXR: true 6DOF, walk around model, near=big far=small
+        setArState('locked')
+        setMode('webxr')
+        await startWebXRSession()
+      } else {
+        // Fallback: keep MindAR running
+        // MindAR naturally tracks the 3D position relative to the card
+        // = real perspective (move phone closer to card = model gets bigger)
+        // = real angles (move phone around card = see model from different sides)
+        setArState('locked')
+        setMode('mindar')
+        // Model stays on anchor - MindAR provides the perspective naturally
+      }
     } catch (err: any) {
-      setError(err.message); setArState('error')
+      console.error('Lock error:', err)
+      // Graceful fallback
+      setArState('locked')
+      setMode('mindar')
     }
   }
 
-  // Gyro-tracked scene with heavy smoothing for stability
-  const startLockedScene = async (THREE: any, container: HTMLElement) => {
+  // WebXR AR Session - full 6DOF positional tracking
+  const startWebXRSession = async () => {
+    const container = document.getElementById('ar-container')
+    if (!container) return
+
+    // Stop MindAR first
+    if (mindarRef.current) { mindarRef.current.stop(); mindarRef.current = null }
+    if (animationIdRef.current) { cancelAnimationFrame(animationIdRef.current); animationIdRef.current = 0 }
+    container.innerHTML = ''
+
+    const THREE = await import('three')
     const w = window.innerWidth
     const h = window.innerHeight
 
-    // Camera stream - fast startup
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' }
-    })
-    const video = document.createElement('video')
-    video.srcObject = stream
-    video.setAttribute('playsinline', 'true')
-    video.setAttribute('autoplay', 'true')
-    video.muted = true
-    video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:1;'
-    container.appendChild(video)
-    await video.play()
-
-    // Three.js transparent overlay
+    // Setup Three.js WebXR renderer
     const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 1000)
-    camera.position.set(0, 0, 0)
+    const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 100)
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:2;'
+    renderer.xr.enabled = true
+    renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;'
     container.appendChild(renderer.domElement)
 
     // Lighting
@@ -165,189 +175,154 @@ export default function ARPage() {
     dl.position.set(1, 2, 1)
     scene.add(dl)
     const pl = new THREE.PointLight(0x8b5cf6, 0.8, 10)
-    pl.position.set(0, 0, -1.5)
+    pl.position.set(0, 0, -1)
     scene.add(pl)
 
-    // Model at fixed world position (in front of user)
+    // Model at fixed world position (1.5m in front, slightly below eye level)
     const model = createModel(THREE)
     model.visible = true
-    model.position.set(0, 0, -2.5)
+    model.position.set(0, -0.2, -1.5)
+    model.scale.set(2, 2, 2)
     scene.add(model)
 
-    // === Gyroscope with heavy smoothing ===
-    // Raw values from sensor
-    let rawAlpha = 0, rawBeta = 0, rawGamma = 0
-    // Smoothed values (low-pass filtered)
-    let smoothAlpha = 0, smoothBeta = 0, smoothGamma = 0
-    let initialAlpha: number | null = null
-    let hasOrientation = false
-    // Smoothing factor: lower = smoother but more lag (0.03-0.08 is stable)
-    const SMOOTH_FACTOR = 0.05
-    // Target quaternion and current quaternion for slerp
-    const targetQuat = new THREE.Quaternion()
-    const currentQuat = new THREE.Quaternion()
-    // Slerp factor: lower = smoother (0.02-0.08 for stability)
-    const SLERP_FACTOR = 0.04
+    // Ground indicator (subtle circle so user can see the "floor" anchor point)
+    const groundRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.5, 0.52, 64),
+      new THREE.MeshBasicMaterial({ color: 0x8b5cf6, transparent: true, opacity: 0.25, side: THREE.DoubleSide })
+    )
+    groundRing.rotation.x = -Math.PI / 2
+    groundRing.position.set(0, -0.8, -1.5)
+    scene.add(groundRing)
 
-    const onOrientation = (e: DeviceOrientationEvent) => {
-      if (e.alpha !== null) {
-        rawAlpha = e.alpha
-        rawBeta = e.beta || 0
-        rawGamma = e.gamma || 0
-        hasOrientation = true
-      }
+    // Shadow disc
+    const shadowDisc = new THREE.Mesh(
+      new THREE.CircleGeometry(0.4, 32),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.15 })
+    )
+    shadowDisc.rotation.x = -Math.PI / 2
+    shadowDisc.position.set(0, -0.79, -1.5)
+    scene.add(shadowDisc)
+
+    // Request WebXR AR session with dom-overlay for UI
+    const overlayEl = document.getElementById('ar-overlay')
+    const sessionInit: any = {
+      requiredFeatures: ['local-floor'],
+    }
+    if (overlayEl) {
+      sessionInit.optionalFeatures = ['dom-overlay']
+      sessionInit.domOverlay = { root: overlayEl }
     }
 
-    // Request permission (iOS 13+)
-    if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
-      try {
-        const perm = await (DeviceOrientationEvent as any).requestPermission()
-        if (perm === 'granted') window.addEventListener('deviceorientation', onOrientation, true)
-      } catch (e) { console.warn('Gyro permission denied') }
-    } else {
-      window.addEventListener('deviceorientation', onOrientation, true)
-    }
+    const session = await navigator.xr!.requestSession('immersive-ar', sessionInit)
+    xrSessionRef.current = session
+    renderer.xr.setReferenceSpaceType('local-floor')
+    await renderer.xr.setSession(session)
 
+    // XR Animation loop - camera position/rotation automatically tracked by ARCore
     const clock = new THREE.Clock()
-    let animId = 0
-
-    const animate = () => {
+    renderer.setAnimationLoop(() => {
       const t = clock.getElapsedTime()
-
-      if (hasOrientation) {
-        // Capture initial alpha so model appears in front
-        if (initialAlpha === null) initialAlpha = rawAlpha
-
-        // Low-pass filter on raw values
-        smoothAlpha += angleDiff(smoothAlpha, rawAlpha) * SMOOTH_FACTOR
-        smoothBeta += (rawBeta - smoothBeta) * SMOOTH_FACTOR
-        smoothGamma += (rawGamma - smoothGamma) * SMOOTH_FACTOR
-
-        // Convert to radians (relative to initial orientation)
-        const alphaRad = THREE.MathUtils.degToRad(smoothAlpha - initialAlpha)
-        const betaRad = THREE.MathUtils.degToRad(smoothBeta - 90)
-        const gammaRad = THREE.MathUtils.degToRad(-smoothGamma)
-
-        // Set target quaternion from euler
-        const euler = new THREE.Euler(betaRad, alphaRad, gammaRad, 'YXZ')
-        targetQuat.setFromEuler(euler)
-
-        // Slerp current -> target for ultra-smooth movement
-        currentQuat.slerp(targetQuat, SLERP_FACTOR)
-        camera.quaternion.copy(currentQuat)
-      }
-
-      // Gentle floating animation (very subtle, not rotation)
-      const floatY = Math.sin(t * 0.8) * 0.02
-      model.position.y = floatY
-
+      animateModel(model, t)
       renderer.render(scene, camera)
-      animId = requestAnimationFrame(animate)
-    }
-    animate()
+    })
 
-    lockedSceneRef.current = {
-      cleanup: () => {
-        cancelAnimationFrame(animId)
-        window.removeEventListener('deviceorientation', onOrientation, true)
-        stream.getTracks().forEach(t => t.stop())
-        renderer.dispose()
-      }
-    }
+    session.addEventListener('end', () => {
+      renderer.setAnimationLoop(null)
+      xrSessionRef.current = null
+    })
   }
 
   const startScan = () => {
     setArState('scanning')
     if (modelGroupRef.current) {
       modelGroupRef.current.visible = false
-      modelGroupRef.current.userData.locked = false
     }
   }
 
   const rescan = () => {
-    if (lockedSceneRef.current) { lockedSceneRef.current.cleanup(); lockedSceneRef.current = null }
+    if (xrSessionRef.current) { try { xrSessionRef.current.end() } catch (e) {} xrSessionRef.current = null }
     window.location.reload()
   }
 
   const goBack = () => {
-    if (mindarRef.current) { try { mindarRef.current.stop() } catch(e) {} }
-    if (lockedSceneRef.current) { lockedSceneRef.current.cleanup() }
+    if (mindarRef.current) { try { mindarRef.current.stop() } catch (e) {} }
+    if (xrSessionRef.current) { try { xrSessionRef.current.end() } catch (e) {} }
     Taro.navigateBack()
   }
 
   return (
     <div className="ar-page">
       <div id="ar-container" className="ar-container" />
+      <div id="ar-overlay" className="ar-overlay">
 
-      {arState === 'loading' && (
-        <div className="ar-loading-overlay">
-          <div className="ar-loading-spinner" />
-          <span className="ar-loading-text">正在启动摄像头...</span>
-        </div>
-      )}
-
-      {(arState === 'preview' || arState === 'scanning') && (
-        <div className="ar-viewfinder">
-          <div className="viewfinder-frame">
-            <div className="frame-corner top-left" />
-            <div className="frame-corner top-right" />
-            <div className="frame-corner bottom-left" />
-            <div className="frame-corner bottom-right" />
-          </div>
-          <span className="viewfinder-text">
-            {arState === 'preview' ? '将识别图放入框内' : '对准识别图...'}
-          </span>
-        </div>
-      )}
-
-      {arState === 'detected' && (
-        <div className="ar-detected-hint">
-          <span>模型已加载 · 调整位置后点击下方固定</span>
-        </div>
-      )}
-
-      <div className="ar-topbar">
-        <div className="ar-back-btn" onClick={goBack}>←</div>
-        {arState === 'locked' && <div className="ar-locked-badge">已固定 · 移动手机环绕查看</div>}
-      </div>
-
-      <div className="ar-bottom">
-        {arState === 'preview' && (
-          <div className="scan-btn" onClick={startScan}>
-            <div className="scan-btn-inner"><span>开始扫描</span></div>
+        {arState === 'loading' && (
+          <div className="ar-loading-overlay">
+            <div className="ar-loading-spinner" />
+            <span className="ar-loading-text">正在启动摄像头...</span>
           </div>
         )}
-        {arState === 'scanning' && (
-          <div className="scanning-indicator">
-            <div className="scanning-pulse" />
-            <span className="scanning-text">扫描中...</span>
+
+        {(arState === 'preview' || arState === 'scanning') && (
+          <div className="ar-viewfinder">
+            <div className="viewfinder-frame">
+              <div className="frame-corner top-left" />
+              <div className="frame-corner top-right" />
+              <div className="frame-corner bottom-left" />
+              <div className="frame-corner bottom-right" />
+            </div>
+            <span className="viewfinder-text">
+              {arState === 'preview' ? '将识别图放入框内' : '对准识别图...'}
+            </span>
           </div>
         )}
+
         {arState === 'detected' && (
-          <div className="lock-btn" onClick={lockModel}><span>固定在此位置</span></div>
+          <div className="ar-detected-hint">
+            <span>模型已出现 · 靠近/远离识别图预览效果</span>
+          </div>
         )}
-        {arState === 'locked' && (
-          <div className="rescan-btn" onClick={rescan}><span>重新扫描</span></div>
+
+        <div className="ar-topbar">
+          <div className="ar-back-btn" onClick={goBack}>←</div>
+          {arState === 'locked' && (
+            <div className="ar-locked-badge">
+              {mode === 'webxr'
+                ? '空间追踪中 · 自由走动环绕查看'
+                : '保持识别图在画面内 · 靠近/远离/环绕'}
+            </div>
+          )}
+        </div>
+
+        <div className="ar-bottom">
+          {arState === 'preview' && (
+            <div className="scan-btn" onClick={startScan}>
+              <div className="scan-btn-inner"><span>开始扫描</span></div>
+            </div>
+          )}
+          {arState === 'scanning' && (
+            <div className="scanning-indicator">
+              <div className="scanning-pulse" />
+              <span className="scanning-text">扫描中...</span>
+            </div>
+          )}
+          {arState === 'detected' && (
+            <div className="lock-btn" onClick={lockModel}><span>固定在此位置</span></div>
+          )}
+          {arState === 'locked' && (
+            <div className="rescan-btn" onClick={rescan}><span>重新扫描</span></div>
+          )}
+        </div>
+
+        {arState === 'error' && (
+          <div className="ar-error">
+            <span className="error-icon">!</span>
+            <span className="error-text">{error}</span>
+            <div className="error-btn" onClick={goBack}>返回首页</div>
+          </div>
         )}
       </div>
-
-      {arState === 'error' && (
-        <div className="ar-error">
-          <span className="error-icon">!</span>
-          <span className="error-text">{error}</span>
-          <div className="error-btn" onClick={goBack}>返回首页</div>
-        </div>
-      )}
     </div>
   )
-}
-
-// Helper: compute shortest angular difference (handles 0/360 wrap)
-function angleDiff(current: number, target: number): number {
-  let diff = target - current
-  while (diff > 180) diff -= 360
-  while (diff < -180) diff += 360
-  return diff
 }
 
 function createModel(THREE: any) {
@@ -403,13 +378,13 @@ function animateModel(group: any, t: number) {
   const r3 = group.getObjectByName('ring3')
   const pts = group.getObjectByName('particles')
   if (ico) {
-    ico.rotation.y = t * 0.5
-    ico.rotation.x = Math.sin(t * 0.3) * 0.2
-    const s = 1 + Math.sin(t * 2) * 0.05
+    ico.rotation.y = t * 0.3
+    ico.rotation.x = Math.sin(t * 0.2) * 0.1
+    const s = 1 + Math.sin(t * 1.5) * 0.03
     ico.scale.set(s, s, s)
   }
-  if (r1) r1.rotation.z = t * 0.8
-  if (r2) r2.rotation.z = -t * 0.6
-  if (r3) r3.rotation.x = t * 0.4
-  if (pts) pts.rotation.y = t * 0.2
+  if (r1) r1.rotation.z = t * 0.5
+  if (r2) r2.rotation.z = -t * 0.4
+  if (r3) r3.rotation.x = t * 0.3
+  if (pts) pts.rotation.y = t * 0.15
 }

@@ -18,6 +18,14 @@
   overflow: hidden !important;
 }
 
+.ar-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 10;
+  pointer-events: none;
+  & > * { pointer-events: auto; }
+}
+
 /* Force MindAR internal elements to be visible */
 .ar-container video,
 .ar-container canvas {
