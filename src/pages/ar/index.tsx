@@ -3,48 +3,44 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import './index.scss'
 
+type ARState = 'preview' | 'scanning' | 'detected' | 'locked' | 'error'
+
 export default function ARPage() {
   const mindarRef = useRef<any>(null)
-  const [loading, setLoading] = useState(true)
-  const [progress, setProgress] = useState(0)
-  const [detected, setDetected] = useState(false)
+  const anchorRef = useRef<any>(null)
+  const sceneRef = useRef<any>(null)
+  const modelGroupRef = useRef<any>(null)
+  const rendererRef = useRef<any>(null)
+  const cameraRef = useRef<any>(null)
+  const animationIdRef = useRef<number>(0)
+  const [arState, setArState] = useState<ARState>('preview')
   const [error, setError] = useState<string | null>(null)
 
+  // Initialize camera preview only (no scanning yet)
   useEffect(() => {
     let isMounted = true
-    let animationId: number
 
-    const initAR = async () => {
+    const initCamera = async () => {
       try {
-        // Use real DOM element directly - Taro View doesn't give standard div
         const container = document.getElementById('ar-container')
-        if (!container) {
-          throw new Error('AR container not found')
-        }
+        if (!container) throw new Error('Container not found')
 
-        // Ensure container has dimensions
         container.style.width = '100vw'
         container.style.height = '100vh'
-        container.style.position = 'relative'
+        container.style.position = 'fixed'
+        container.style.top = '0'
+        container.style.left = '0'
         container.style.overflow = 'hidden'
 
-        setProgress(20)
-
-        // Dynamically import Three.js
         const THREE = await import('three')
-        setProgress(40)
-
-        // Import MindAR from local lib (no CDN dependency)
         const mindArModule = await import('../../lib/mindar/mindar-image-three.prod.js')
         const MindARThree = mindArModule.MindARThree
-        if (!MindARThree) {
-          throw new Error('MindAR library failed to load')
+
+        if (!MindARThree || !isMounted) {
+          throw new Error('MindAR failed to load')
         }
-        setProgress(60)
 
-        if (!isMounted) return
-
-        // Initialize MindAR
+        // Initialize MindAR but don't start scanning yet
         const mindarThree = new MindARThree({
           container: container,
           imageTargetSrc: './assets/ar/card.mind',
@@ -56,24 +52,26 @@ export default function ARPage() {
         mindarRef.current = mindarThree
 
         const { renderer, scene, camera } = mindarThree
+        rendererRef.current = renderer
+        sceneRef.current = scene
+        cameraRef.current = camera
 
-        // Setup lighting
+        // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
         scene.add(ambientLight)
-
         const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
         directionalLight.position.set(0.5, 1, 0.8)
         scene.add(directionalLight)
-
         const pointLight = new THREE.PointLight(0x8b5cf6, 1, 10)
         pointLight.position.set(0, 0.5, 0.5)
         scene.add(pointLight)
 
-        // Create 3D model - animated geometric sculpture
+        // Create 3D model
         const anchor = mindarThree.addAnchor(0)
+        anchorRef.current = anchor
 
-        // Main group
         const modelGroup = new THREE.Group()
+        modelGroupRef.current = modelGroup
 
         // Central icosahedron
         const icoGeometry = new THREE.IcosahedronGeometry(0.3, 1)
@@ -83,7 +81,6 @@ export default function ARPage() {
           roughness: 0.2,
           clearcoat: 1.0,
           clearcoatRoughness: 0.1,
-          envMapIntensity: 1.0,
         })
         const icosahedron = new THREE.Mesh(icoGeometry, icoMaterial)
         modelGroup.add(icosahedron)
@@ -97,21 +94,18 @@ export default function ARPage() {
           emissive: 0x4f46e5,
           emissiveIntensity: 0.3,
         })
-
         const ring1 = new THREE.Mesh(ringGeometry, ringMaterial)
         ring1.rotation.x = Math.PI / 3
         modelGroup.add(ring1)
-
         const ring2 = new THREE.Mesh(ringGeometry, ringMaterial.clone())
         ring2.rotation.x = -Math.PI / 3
         ring2.rotation.y = Math.PI / 4
         modelGroup.add(ring2)
-
         const ring3 = new THREE.Mesh(ringGeometry, ringMaterial.clone())
         ring3.rotation.z = Math.PI / 2
         modelGroup.add(ring3)
 
-        // Floating particles
+        // Particles
         const particleCount = 30
         const particlesGeometry = new THREE.BufferGeometry()
         const positions = new Float32Array(particleCount * 3)
@@ -133,74 +127,94 @@ export default function ARPage() {
         const particles = new THREE.Points(particlesGeometry, particlesMaterial)
         modelGroup.add(particles)
 
+        // Initially hide model
+        modelGroup.visible = false
         anchor.group.add(modelGroup)
 
-        setProgress(80)
-
-        // Listen for target found/lost
+        // Target found/lost events
         anchor.onTargetFound = () => {
-          if (isMounted) setDetected(true)
+          if (!isMounted) return
+          modelGroup.visible = true
+          setArState('detected')
         }
         anchor.onTargetLost = () => {
-          if (isMounted) setDetected(false)
+          if (!isMounted) return
+          // Only hide if not locked
+          if (modelGroup.userData.locked) return
+          modelGroup.visible = false
+          setArState('scanning')
         }
 
-        // Start AR
+        // Start MindAR (camera + rendering, detection is always on but we control UI)
         await mindarThree.start()
 
-        setProgress(100)
-        if (isMounted) setLoading(false)
-
-        // Animation loop
-        const clock = new THREE.Clock()
-        const animate = () => {
-          const elapsed = clock.getElapsedTime()
-
-          // Rotate model
-          icosahedron.rotation.y = elapsed * 0.5
-          icosahedron.rotation.x = Math.sin(elapsed * 0.3) * 0.2
-
-          // Rotate rings
-          ring1.rotation.z = elapsed * 0.8
-          ring2.rotation.z = -elapsed * 0.6
-          ring3.rotation.x = elapsed * 0.4
-
-          // Pulse scale
-          const scale = 1 + Math.sin(elapsed * 2) * 0.05
-          icosahedron.scale.set(scale, scale, scale)
-
-          // Rotate particles
-          particles.rotation.y = elapsed * 0.2
-
-          renderer.render(scene, camera)
-          animationId = requestAnimationFrame(animate)
+        if (isMounted) {
+          setArState('preview')
+          // Start animation loop
+          const clock = new THREE.Clock()
+          const animate = () => {
+            const elapsed = clock.getElapsedTime()
+            if (modelGroup.visible) {
+              icosahedron.rotation.y = elapsed * 0.5
+              icosahedron.rotation.x = Math.sin(elapsed * 0.3) * 0.2
+              ring1.rotation.z = elapsed * 0.8
+              ring2.rotation.z = -elapsed * 0.6
+              ring3.rotation.x = elapsed * 0.4
+              const scale = 1 + Math.sin(elapsed * 2) * 0.05
+              icosahedron.scale.set(scale, scale, scale)
+              particles.rotation.y = elapsed * 0.2
+            }
+            renderer.render(scene, camera)
+            animationIdRef.current = requestAnimationFrame(animate)
+          }
+          animate()
         }
-        animate()
       } catch (err: any) {
         console.error('AR init error:', err)
         if (isMounted) {
-          setLoading(false)
+          setArState('error')
           setError(err.message || '无法启动AR，请确保已授权摄像头权限')
         }
       }
     }
 
-    // Small delay to ensure DOM is rendered
-    setTimeout(() => initAR(), 100)
+    setTimeout(() => initCamera(), 200)
 
     return () => {
       isMounted = false
-      if (animationId) cancelAnimationFrame(animationId)
-      if (mindarRef.current) {
-        mindarRef.current.stop()
-      }
+      if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current)
+      if (mindarRef.current) mindarRef.current.stop()
     }
   }, [])
 
-  const goBack = () => {
-    if (mindarRef.current) {
-      mindarRef.current.stop()
+  // Start scanning - user presses button
+  const startScan = () => {
+    setArState('scanning')
+    if (modelGroupRef.current) {
+      modelGroupRef.current.visible = false
+      modelGroupRef.current.userData.locked = false
     }
+  }
+
+  // Lock model in place
+  const lockModel = () => {
+    if (modelGroupRef.current) {
+      modelGroupRef.current.userData.locked = true
+      setArState('locked')
+    }
+  }
+
+  // Rescan - reset and scan again
+  const rescan = () => {
+    if (modelGroupRef.current) {
+      modelGroupRef.current.visible = false
+      modelGroupRef.current.userData.locked = false
+    }
+    setArState('scanning')
+  }
+
+  const goBack = () => {
+    if (mindarRef.current) mindarRef.current.stop()
     Taro.navigateBack()
   }
 
@@ -208,37 +222,69 @@ export default function ARPage() {
     <View className="ar-page">
       <div id="ar-container" className="ar-container" />
 
-      {/* Overlay UI */}
-      <View className="ar-overlay">
+      {/* Viewfinder frame - shown during preview and scanning */}
+      {(arState === 'preview' || arState === 'scanning') && (
+        <View className="ar-viewfinder">
+          <View className="viewfinder-frame">
+            <View className="frame-corner top-left" />
+            <View className="frame-corner top-right" />
+            <View className="frame-corner bottom-left" />
+            <View className="frame-corner bottom-right" />
+          </View>
+          <Text className="viewfinder-text">
+            {arState === 'preview' ? '将识别图放入框内' : '正在识别中...'}
+          </Text>
+        </View>
+      )}
+
+      {/* Top bar */}
+      <View className="ar-topbar">
         <View className="ar-back-btn" onClick={goBack}>
           <Text>←</Text>
         </View>
-        <View className={`ar-status ${detected ? 'detected' : ''}`}>
-          <View className={`status-dot ${detected ? 'active' : ''}`} />
-          <Text>{detected ? '已识别' : '扫描中...'}</Text>
-        </View>
+        {arState === 'locked' && (
+          <View className="ar-locked-badge">
+            <Text>✓ 已定位</Text>
+          </View>
+        )}
       </View>
 
-      {/* Scan guide */}
-      {!detected && !loading && !error && (
-        <View className="ar-scan-guide">
-          <Text className="guide-text">将摄像头对准识别图</Text>
-        </View>
-      )}
-
-      {/* Loading */}
-      {loading && (
-        <View className="ar-loading">
-          <View className="loading-spinner" />
-          <Text className="loading-text">正在初始化AR引擎...</Text>
-          <View className="loading-progress">
-            <View className="progress-bar" style={{ width: `${progress}%` }} />
+      {/* Bottom controls */}
+      <View className="ar-bottom">
+        {arState === 'preview' && (
+          <View className="scan-btn" onClick={startScan}>
+            <View className="scan-btn-inner">
+              <Text className="scan-btn-text">开始扫描</Text>
+            </View>
           </View>
-        </View>
-      )}
+        )}
+
+        {arState === 'scanning' && (
+          <View className="scanning-indicator">
+            <View className="scanning-pulse" />
+            <Text className="scanning-text">扫描中...</Text>
+          </View>
+        )}
+
+        {arState === 'detected' && (
+          <View className="detected-controls">
+            <View className="lock-btn" onClick={lockModel}>
+              <Text className="lock-btn-text">✓ 固定位置</Text>
+            </View>
+          </View>
+        )}
+
+        {arState === 'locked' && (
+          <View className="locked-controls">
+            <View className="rescan-btn" onClick={rescan}>
+              <Text className="rescan-btn-text">重新扫描</Text>
+            </View>
+          </View>
+        )}
+      </View>
 
       {/* Error */}
-      {error && (
+      {arState === 'error' && (
         <View className="ar-error">
           <Text className="error-icon">📷</Text>
           <Text className="error-text">{error}</Text>
