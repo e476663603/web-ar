@@ -231,14 +231,42 @@ export default function ARPage() {
     model.visible = false
     scene.add(model)
 
-    // === Placement ring indicator (shown during dragging) ===
-    const ringGeo = new THREE.RingGeometry(0.15, 0.2, 48)
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide, transparent: true, opacity: 0.7 })
+    // === Placement indicator: 3D pillar + ground disc (visible from any angle) ===
+    const indicatorGroup = new THREE.Group()
+    indicatorGroup.visible = false
+
+    // Ground disc
+    const discGeo = new THREE.CircleGeometry(0.2, 48)
+    const discMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+    const disc = new THREE.Mesh(discGeo, discMat)
+    disc.rotation.x = -Math.PI / 2
+    disc.position.y = 0.003
+    indicatorGroup.add(disc)
+
+    // Ring around disc
+    const ringGeo = new THREE.RingGeometry(0.18, 0.25, 48)
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
     const placementRing = new THREE.Mesh(ringGeo, ringMat)
     placementRing.rotation.x = -Math.PI / 2
     placementRing.position.y = 0.005
-    placementRing.visible = false
-    scene.add(placementRing)
+    indicatorGroup.add(placementRing)
+
+    // Vertical pillar (always visible from side view)
+    const pillarGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.5, 8)
+    const pillarMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.6 })
+    const pillar = new THREE.Mesh(pillarGeo, pillarMat)
+    pillar.position.y = 0.25
+    indicatorGroup.add(pillar)
+
+    // Top sphere marker
+    const topSphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.9 })
+    )
+    topSphere.position.y = 0.52
+    indicatorGroup.add(topSphere)
+
+    scene.add(indicatorGroup)
 
     // === Depth Occlusion Shader ===
     const depthOcclusionMaterial = new THREE.ShaderMaterial({
@@ -335,8 +363,8 @@ export default function ARPage() {
       // Model starts at default position
       model.position.set(0, 0, -1.5)
       model.visible = true
-      placementRing.position.set(0, 0.005, -1.5)
-      placementRing.visible = true
+      indicatorGroup.position.set(0, 0, -1.5)
+      indicatorGroup.visible = true
 
       // === Create anchor at model position ===
       const createAnchorAt = async (x: number, y: number, z: number) => {
@@ -367,12 +395,19 @@ export default function ARPage() {
       // === Touch Handlers ===
       const onTouchStart = (e: TouchEvent) => {
         if (modelPlaced) return
+        // Don't start drag if touching UI buttons
+        const target = e.target as HTMLElement
+        if (target.closest('.confirm-place-btn, .ar-back-btn, .rescan-btn')) return
         e.preventDefault()
         isDragging = true
         const touch = e.touches[0]
         dragTouchPos = { x: touch.clientX, y: touch.clientY }
         ringMat.color.set(0x22c55e) // Green while dragging
+        discMat.color.set(0x22c55e)
+        pillarMat.color.set(0x22c55e)
+        topSphere.material.color.set(0x22c55e)
         ringMat.opacity = 1.0
+        discMat.opacity = 0.6
       }
 
       const onTouchMove = (e: TouchEvent) => {
@@ -385,9 +420,11 @@ export default function ARPage() {
       const onTouchEnd = (e: TouchEvent) => {
         if (!isDragging || modelPlaced) return
         isDragging = false
-        // DON'T finalize — just re-anchor at current position
         anchorUpdatePending = true
         ringMat.color.set(0xfbbf24) // Yellow idle
+        discMat.color.set(0xfbbf24)
+        pillarMat.color.set(0xfbbf24)
+        topSphere.material.color.set(0xfbbf24)
       }
 
       if (overlayEl) {
@@ -400,7 +437,7 @@ export default function ARPage() {
       const finalizePlacement = async () => {
         if (modelPlaced) return
         modelPlaced = true
-        placementRing.visible = false
+        indicatorGroup.visible = false
         setEdgeWarning('')
 
         // Re-anchor one final time at current position
@@ -436,11 +473,7 @@ export default function ARPage() {
                 anchorPose.transform.position.y,
                 anchorPose.transform.position.z
               )
-              placementRing.position.set(
-                model.position.x,
-                model.position.y + 0.005,
-                model.position.z
-              )
+              indicatorGroup.position.set(model.position.x, model.position.y, model.position.z)
             }
           } catch (e) { /* anchor unavailable this frame */ }
         }
@@ -457,8 +490,8 @@ export default function ARPage() {
           if (raycaster.ray.intersectPlane(floorPlane, intersectPoint)) {
             model.position.x += (intersectPoint.x - model.position.x) * 0.25
             model.position.z += (intersectPoint.z - model.position.z) * 0.25
-            placementRing.position.x = model.position.x
-            placementRing.position.z = model.position.z
+            indicatorGroup.position.x = model.position.x
+            indicatorGroup.position.z = model.position.z
           }
 
           // Hit-test to adjust Y
@@ -468,7 +501,7 @@ export default function ARPage() {
               const pose = hits[0].getPose(threeRefSpace)
               if (pose && Math.abs(pose.transform.position.y - model.position.y) < 0.5) {
                 model.position.y += (pose.transform.position.y - model.position.y) * 0.15
-                placementRing.position.y = model.position.y + 0.005
+                indicatorGroup.position.set(model.position.x, model.position.y, model.position.z)
               }
             }
           } catch (e) { /* skip */ }
@@ -487,10 +520,22 @@ export default function ARPage() {
           else if (sy > 1 - margin) edge = edge ? edge + '-top' : 'top'
           setEdgeWarning(edge)
           if (edge) {
-            ringMat.color.set(0xef4444) // Red near edge
+            ringMat.color.set(0xef4444)
+            discMat.color.set(0xef4444)
+            pillarMat.color.set(0xef4444)
+            topSphere.material.color.set(0xef4444)
           } else {
-            ringMat.color.set(isDragging ? 0x22c55e : 0xfbbf24)
+            const c = isDragging ? 0x22c55e : 0xfbbf24
+            ringMat.color.set(c)
+            discMat.color.set(c)
+            pillarMat.color.set(c)
+            topSphere.material.color.set(c)
           }
+
+          // Pulse animation
+          const pulse = 0.6 + Math.sin(timestamp * 0.004) * 0.3
+          ringMat.opacity = pulse
+          topSphere.material.opacity = pulse
         }
 
         // --- Depth occlusion ---
