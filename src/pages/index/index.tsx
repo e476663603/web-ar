@@ -2,7 +2,7 @@ import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import './index.scss'
 
-const APP_VERSION = '1.3.0'
+const APP_VERSION = '1.3.1'
 
 export default function Index() {
   const goToAR = () => {

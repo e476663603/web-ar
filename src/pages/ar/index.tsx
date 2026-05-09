@@ -21,7 +21,6 @@ export default function ARPage() {
         container.style.width = window.innerWidth + 'px'
         container.style.height = window.innerHeight + 'px'
 
-        // Load dependencies
         const [THREE, mindArModule] = await Promise.all([
           import('three'),
           import('../../lib/mindar/mindar-image-three.prod.js')
@@ -31,7 +30,6 @@ export default function ARPage() {
         const MindARThree = mindArModule.MindARThree
         if (!MindARThree) throw new Error('MindAR load failed')
 
-        // MindAR only for image detection (not for rendering model)
         const mindarThree = new MindARThree({
           container,
           imageTargetSrc: './assets/ar/card.mind',
@@ -41,22 +39,25 @@ export default function ARPage() {
         const { renderer, scene, camera } = mindarThree
         const anchor = mindarThree.addAnchor(0)
 
-        // Green ring indicator on detected image
-        const indicator = new THREE.Mesh(
-          new THREE.RingGeometry(0.3, 0.35, 32),
-          new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide })
-        )
-        indicator.visible = false
-        anchor.group.add(indicator)
+        // Lighting for preview
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7))
+        const dl = new THREE.DirectionalLight(0xffffff, 0.9)
+        dl.position.set(0.5, 1, 0.8); scene.add(dl)
+        scene.add(new THREE.PointLight(0x8b5cf6, 0.8, 10))
+
+        // Model on anchor = real-time preview during scanning
+        const modelGroup = createModel(THREE)
+        modelGroup.visible = false
+        anchor.group.add(modelGroup)
 
         anchor.onTargetFound = () => {
           if (!isMounted) return
-          indicator.visible = true
+          modelGroup.visible = true
           setArState('detected')
         }
         anchor.onTargetLost = () => {
           if (!isMounted) return
-          indicator.visible = false
+          modelGroup.visible = false
           setArState('scanning')
         }
 
@@ -69,14 +70,17 @@ export default function ARPage() {
         setArState('scanning')
 
         let animId = 0
+        const clock = new THREE.Clock()
         const animate = () => {
+          const t = clock.getElapsedTime()
+          if (modelGroup.visible) animateModel(modelGroup, t)
           renderer.render(scene, camera)
           animId = requestAnimationFrame(animate)
         }
         animate()
 
         sceneRef.current = {
-          THREE,
+          THREE, container, mindarThree, animId,
           stop: () => { cancelAnimationFrame(animId); try { mindarThree.stop() } catch (e) {} }
         }
         cleanup = sceneRef.current.stop
@@ -89,20 +93,19 @@ export default function ARPage() {
     return () => { isMounted = false; if (cleanup) cleanup() }
   }, [])
 
-  // Place model into real space
+  // Place model in fixed space
   const placeModel = async () => {
     const ref = sceneRef.current
     if (!ref) return
 
     ref.stop()
-    const container = document.getElementById('ar-container')
-    if (!container) return
+    const container = ref.container as HTMLElement
     container.innerHTML = ''
-
     const THREE = ref.THREE
+
     setArState('placed')
 
-    // Try WebXR (Android Chrome with ARCore)
+    // Try WebXR (Android Chrome + ARCore)
     let xrOk = false
     if (navigator.xr) {
       xrOk = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false)
@@ -112,12 +115,12 @@ export default function ARPage() {
       setMode('webxr')
       await startWebXR(THREE, container)
     } else {
-      setMode('motion')
-      await startMotionTracking(THREE, container)
+      setMode('gyro')
+      await startGyroScene(THREE, container)
     }
   }
 
-  // ========== WebXR: True 6DOF ==========
+  // ===== WebXR: True 6DOF =====
   const startWebXR = async (THREE: any, container: HTMLElement) => {
     const w = window.innerWidth, h = window.innerHeight
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
@@ -129,58 +132,40 @@ export default function ARPage() {
 
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 100)
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.8))
-    const dl = new THREE.DirectionalLight(0xffffff, 1)
-    dl.position.set(1, 2, 1); scene.add(dl)
-    scene.add(new THREE.PointLight(0x8b5cf6, 0.6, 8))
+    addLighting(THREE, scene)
 
     const model = createModel(THREE)
     model.position.set(0, 0, -1.5)
     model.scale.setScalar(2)
     scene.add(model)
-
-    // Ground shadow
-    const shadow = new THREE.Mesh(
-      new THREE.CircleGeometry(0.5, 32),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.12 })
-    )
-    shadow.rotation.x = -Math.PI / 2
-    shadow.position.set(0, -0.6, -1.5)
-    scene.add(shadow)
+    addGroundIndicator(THREE, scene, model.position)
 
     const overlayEl = document.getElementById('ar-overlay')
     const sessionInit: any = { requiredFeatures: ['local-floor'] }
-    if (overlayEl) {
-      sessionInit.optionalFeatures = ['dom-overlay']
-      sessionInit.domOverlay = { root: overlayEl }
-    }
+    if (overlayEl) { sessionInit.optionalFeatures = ['dom-overlay']; sessionInit.domOverlay = { root: overlayEl } }
 
     try {
       const session = await navigator.xr!.requestSession('immersive-ar', sessionInit)
       renderer.xr.setReferenceSpaceType('local-floor')
       await renderer.xr.setSession(session)
-
       const clock = new THREE.Clock()
-      renderer.setAnimationLoop(() => {
-        animateModel(model, clock.getElapsedTime())
-        renderer.render(scene, camera)
-      })
-
+      renderer.setAnimationLoop(() => { animateModel(model, clock.getElapsedTime()); renderer.render(scene, camera) })
       session.addEventListener('end', () => renderer.setAnimationLoop(null))
       sceneRef.current = { stop: () => { try { session.end() } catch (e) {} } }
     } catch (err) {
       container.innerHTML = ''
-      setMode('motion')
-      await startMotionTracking(THREE, container)
+      setMode('gyro')
+      await startGyroScene(THREE, container)
     }
   }
 
-  // ========== Motion Tracking: Gyro + Accelerometer ==========
-  const startMotionTracking = async (THREE: any, container: HTMLElement) => {
+  // ===== Gyro Scene: ABSOLUTE STABILITY (like Pokemon GO) =====
+  // Only rotation tracking. No accelerometer = zero jitter.
+  // Model stays at fixed world position. Camera at origin, only rotates.
+  const startGyroScene = async (THREE: any, container: HTMLElement) => {
     const w = window.innerWidth, h = window.innerHeight
 
-    // Live camera background
+    // Camera background
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
     const video = document.createElement('video')
     video.srcObject = stream
@@ -190,10 +175,10 @@ export default function ARPage() {
     container.appendChild(video)
     await video.play()
 
-    // 3D Scene
+    // Three.js transparent overlay
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100)
-    camera.position.set(0, 0, 0)
+    camera.position.set(0, 0, 0) // FIXED at origin, never moves
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
@@ -201,73 +186,51 @@ export default function ARPage() {
     renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:2;pointer-events:none;'
     container.appendChild(renderer.domElement)
 
-    // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.8))
-    const dl = new THREE.DirectionalLight(0xffffff, 1)
-    dl.position.set(1, 2, 1); scene.add(dl)
-    scene.add(new THREE.PointLight(0x8b5cf6, 0.6, 8))
+    addLighting(THREE, scene)
 
-    // Model fixed at 1.5m in front
+    // Model at fixed world position (2m in front of initial camera direction)
     const model = createModel(THREE)
-    model.position.set(0, 0, -1.5)
+    model.position.set(0, 0, -2)
     model.scale.setScalar(1.8)
     scene.add(model)
+    addGroundIndicator(THREE, scene, model.position)
 
-    // Ground ring
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.4, 0.43, 48),
-      new THREE.MeshBasicMaterial({ color: 0x8b5cf6, transparent: true, opacity: 0.2, side: THREE.DoubleSide })
-    )
-    ring.rotation.x = -Math.PI / 2
-    ring.position.set(0, -0.5, -1.5)
-    scene.add(ring)
-
-    // --- Gyroscope: camera rotation ---
+    // === GYROSCOPE ONLY - Triple smoothing for rock-solid stability ===
     let rawAlpha = 0, rawBeta = 90, rawGamma = 0
     let initAlpha: number | null = null
     let hasGyro = false
 
+    // Smoothed values (exponential moving average)
+    let sAlpha = 0, sBeta = 90, sGamma = 0
+    // Low-pass factor: lower = smoother (0.02-0.05 for stability)
+    const SMOOTH = 0.035
+    // Dead zone: ignore tiny sensor noise (degrees)
+    const DEAD = 0.1
+    // Quaternion slerp factor: lower = more stable
+    const SLERP = 0.025
+
+    const targetQ = new THREE.Quaternion()
+    const currentQ = new THREE.Quaternion()
+    let qInitialized = false
+
     const onOrientation = (e: DeviceOrientationEvent) => {
       if (e.alpha !== null) {
-        rawAlpha = e.alpha!; rawBeta = e.beta || 90; rawGamma = e.gamma || 0
+        rawAlpha = e.alpha!
+        rawBeta = e.beta || 90
+        rawGamma = e.gamma || 0
         hasGyro = true
       }
     }
 
-    // --- Accelerometer: camera position ---
-    let velX = 0, velZ = 0, posX = 0, posZ = 0
-    const THRESHOLD = 1.5    // noise filter
-    const SCALE = 0.00025    // acceleration -> velocity scale
-    const DAMPING = 0.90     // velocity decay per frame
-
-    const onMotion = (e: DeviceMotionEvent) => {
-      // Use acceleration (without gravity) if available, else fallback
-      const accel = e.acceleration || e.accelerationIncludingGravity
-      if (!accel) return
-      const ax = accel.x || 0
-      const az = accel.z || 0
-
-      if (Math.abs(ax) > THRESHOLD) velX -= ax * SCALE
-      if (Math.abs(az) > THRESHOLD) velZ += az * SCALE
-    }
-
-    // Request sensor permissions (iOS 13+)
+    // Request permission (iOS 13+)
     if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
       try {
         const p = await (DeviceOrientationEvent as any).requestPermission()
-        if (p === 'granted') {
-          window.addEventListener('deviceorientation', onOrientation, true)
-          window.addEventListener('devicemotion', onMotion, true)
-        }
+        if (p === 'granted') window.addEventListener('deviceorientation', onOrientation, true)
       } catch (e) {}
     } else {
       window.addEventListener('deviceorientation', onOrientation, true)
-      window.addEventListener('devicemotion', onMotion, true)
     }
-
-    // Quaternion smoothing
-    const targetQ = new THREE.Quaternion()
-    const currentQ = new THREE.Quaternion()
 
     const clock = new THREE.Clock()
     let animId = 0
@@ -276,23 +239,44 @@ export default function ARPage() {
       const t = clock.getElapsedTime()
       animateModel(model, t)
 
-      // Rotation from gyroscope
       if (hasGyro) {
-        if (initAlpha === null) initAlpha = rawAlpha
-        const a = THREE.MathUtils.degToRad(-(rawAlpha - initAlpha))
-        const b = THREE.MathUtils.degToRad(rawBeta - 90)
-        const g = THREE.MathUtils.degToRad(-rawGamma)
-        targetQ.setFromEuler(new THREE.Euler(b, a, g, 'YXZ'))
-        currentQ.slerp(targetQ, 0.1)
+        // Capture initial facing direction
+        if (initAlpha === null) {
+          initAlpha = rawAlpha
+          sAlpha = rawAlpha
+          sBeta = rawBeta
+          sGamma = rawGamma
+        }
+
+        // Low-pass filter with dead zone
+        const da = angleDiff(sAlpha, rawAlpha)
+        const db = rawBeta - sBeta
+        const dg = rawGamma - sGamma
+
+        if (Math.abs(da) > DEAD) sAlpha += da * SMOOTH
+        if (Math.abs(db) > DEAD) sBeta += db * SMOOTH
+        if (Math.abs(dg) > DEAD) sGamma += dg * SMOOTH
+
+        // Normalize sAlpha to 0-360
+        while (sAlpha < 0) sAlpha += 360
+        while (sAlpha >= 360) sAlpha -= 360
+
+        // Convert to camera rotation (relative to initial direction)
+        const yaw = THREE.MathUtils.degToRad(-(sAlpha - initAlpha))
+        const pitch = THREE.MathUtils.degToRad(sBeta - 90)
+        const roll = THREE.MathUtils.degToRad(-sGamma)
+
+        targetQ.setFromEuler(new THREE.Euler(pitch, yaw, roll, 'YXZ'))
+
+        // Slerp for extra smoothness
+        if (!qInitialized) {
+          currentQ.copy(targetQ)
+          qInitialized = true
+        } else {
+          currentQ.slerp(targetQ, SLERP)
+        }
         camera.quaternion.copy(currentQ)
       }
-
-      // Position from accelerometer
-      velX *= DAMPING; velZ *= DAMPING
-      posX += velX; posZ += velZ
-      posX = THREE.MathUtils.clamp(posX, -2.5, 2.5)
-      posZ = THREE.MathUtils.clamp(posZ, -2.5, 2.5)
-      camera.position.set(posX, 0, posZ)
 
       renderer.render(scene, camera)
       animId = requestAnimationFrame(animate)
@@ -303,7 +287,6 @@ export default function ARPage() {
       stop: () => {
         cancelAnimationFrame(animId)
         window.removeEventListener('deviceorientation', onOrientation, true)
-        window.removeEventListener('devicemotion', onMotion, true)
         stream.getTracks().forEach(t => t.stop())
         renderer.dispose()
       }
@@ -340,15 +323,15 @@ export default function ARPage() {
               <div className="frame-corner bottom-left" />
               <div className="frame-corner bottom-right" />
             </div>
-            <span className="viewfinder-text">对准识别图</span>
+            <span className="viewfinder-text">对准识别图 · 模型会出现在图上</span>
           </div>
         )}
 
         {arState === 'detected' && (
           <div className="ar-detected-overlay">
-            <div className="detected-badge">识别成功</div>
+            <div className="detected-info">预览中 · 确认后点击固定到空间</div>
             <div className="place-btn" onClick={placeModel}>
-              <span>放置模型</span>
+              <span>固定到空间</span>
             </div>
           </div>
         )}
@@ -357,7 +340,7 @@ export default function ARPage() {
           <div className="ar-back-btn" onClick={goBack}>←</div>
           {arState === 'placed' && (
             <div className="ar-locked-badge">
-              {mode === 'webxr' ? '空间追踪 · 自由走动查看' : '移动手机 · 靠近远离环绕模型'}
+              {mode === 'webxr' ? '空间追踪 · 自由走动' : '已固定 · 转动手机环绕查看'}
             </div>
           )}
         </div>
@@ -377,6 +360,33 @@ export default function ARPage() {
       </div>
     </div>
   )
+}
+
+// ===== Utility Functions =====
+
+function angleDiff(current: number, target: number): number {
+  let d = target - current
+  while (d > 180) d -= 360
+  while (d < -180) d += 360
+  return d
+}
+
+function addLighting(THREE: any, scene: any) {
+  scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+  const dl = new THREE.DirectionalLight(0xffffff, 1)
+  dl.position.set(1, 2, 1); scene.add(dl)
+  const pl = new THREE.PointLight(0x8b5cf6, 0.6, 8)
+  pl.position.set(0, 0, -1); scene.add(pl)
+}
+
+function addGroundIndicator(THREE: any, scene: any, pos: any) {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.4, 0.43, 48),
+    new THREE.MeshBasicMaterial({ color: 0x8b5cf6, transparent: true, opacity: 0.15, side: THREE.DoubleSide })
+  )
+  ring.rotation.x = -Math.PI / 2
+  ring.position.set(pos.x, pos.y - 0.6, pos.z)
+  scene.add(ring)
 }
 
 function createModel(THREE: any) {
