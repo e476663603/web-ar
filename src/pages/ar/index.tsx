@@ -2,7 +2,7 @@ import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import './index.scss'
 
-type ARState = 'loading' | 'scanning' | 'detected' | 'placed' | 'error'
+type ARState = 'loading' | 'scanning' | 'detected' | 'placing' | 'placed' | 'error'
 
 export default function ARPage() {
   const sceneRef = useRef<any>(null)
@@ -26,9 +26,7 @@ export default function ARPage() {
         ])
         if (!isMounted) return
 
-        // Load FBXLoader
         const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js')
-
         const MindARThree = mindArModule.MindARThree
         if (!MindARThree) throw new Error('MindAR load failed')
 
@@ -41,34 +39,29 @@ export default function ARPage() {
         const { renderer, scene, camera } = mindarThree
         const anchor = mindarThree.addAnchor(0)
 
-        // Lighting
+        // Lighting for preview
         scene.add(new THREE.AmbientLight(0xffffff, 0.8))
         const dl = new THREE.DirectionalLight(0xffffff, 1)
         dl.position.set(1, 2, 1); scene.add(dl)
 
-        // Load FBX model onto anchor for PREVIEW during scanning
+        // Load FBX model for preview on recognition image
         let modelGroup: any = null
         const loader = new FBXLoader()
         try {
           const fbx = await new Promise<any>((resolve, reject) => {
             loader.load('./assets/ar/test.fbx', resolve, undefined, reject)
           })
-          // Remove all animations
           if (fbx.animations) fbx.animations = []
-          // Auto-scale to ~0.5 units
           const box = new THREE.Box3().setFromObject(fbx)
           const size = box.getSize(new THREE.Vector3())
           const maxDim = Math.max(size.x, size.y, size.z)
           const scale = 0.5 / maxDim
           fbx.scale.setScalar(scale)
-          // Center model
           const center = box.getCenter(new THREE.Vector3())
           fbx.position.sub(center.multiplyScalar(scale))
-
           modelGroup = new THREE.Group()
           modelGroup.add(fbx)
         } catch (e) {
-          console.warn('FBX load failed, using fallback')
           modelGroup = new THREE.Mesh(
             new THREE.BoxGeometry(0.3, 0.3, 0.3),
             new THREE.MeshStandardMaterial({ color: 0x6366f1 })
@@ -78,7 +71,6 @@ export default function ARPage() {
         modelGroup.visible = false
         anchor.group.add(modelGroup)
 
-        // Target found = show model preview
         anchor.onTargetFound = () => {
           if (!isMounted) return
           modelGroup.visible = true
@@ -119,7 +111,7 @@ export default function ARPage() {
     return () => { isMounted = false; if (cleanup) cleanup() }
   }, [])
 
-  // Enter WebXR AR
+  // Enter WebXR with hit-test for surface anchoring
   const placeModel = async () => {
     const ref = sceneRef.current
     if (!ref) return
@@ -129,39 +121,71 @@ export default function ARPage() {
     }
     const supported = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false)
     if (!supported) {
-      setError('设备不支持AR，请使用Android Chrome + Google Play Services for AR'); setArState('error'); return
+      setError('设备不支持AR，需要Android Chrome + ARCore'); setArState('error'); return
     }
 
     ref.stop()
     const container = ref.container as HTMLElement
     container.innerHTML = ''
 
-    setArState('placed')
+    setArState('placing')
     await startWebXR(ref.THREE, ref.FBXLoader, container)
   }
 
-  // ===== ONLY WebXR - True 6DOF =====
+  // ===== WebXR with hit-test anchoring + shadows =====
   const startWebXR = async (THREE: any, FBXLoaderClass: any, container: HTMLElement) => {
     const w = window.innerWidth, h = window.innerHeight
 
+    // Renderer with shadow support
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.xr.enabled = true
+    renderer.shadowMap.enabled = true
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;'
     container.appendChild(renderer.domElement)
 
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 100)
 
-    // Good lighting for FBX model
-    scene.add(new THREE.AmbientLight(0xffffff, 1.0))
-    const dl = new THREE.DirectionalLight(0xffffff, 1.2)
-    dl.position.set(1, 3, 2); scene.add(dl)
-    const dl2 = new THREE.DirectionalLight(0xffffff, 0.4)
-    dl2.position.set(-2, 1, -1); scene.add(dl2)
+    // === Lighting with shadows (key for depth perception) ===
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+    scene.add(ambientLight)
 
-    // Load FBX into WebXR scene - NO animation
+    // Main directional light that casts shadows
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.5)
+    sunLight.position.set(0.5, 3, 1)
+    sunLight.castShadow = true
+    sunLight.shadow.mapSize.width = 1024
+    sunLight.shadow.mapSize.height = 1024
+    sunLight.shadow.camera.near = 0.1
+    sunLight.shadow.camera.far = 10
+    sunLight.shadow.camera.left = -2
+    sunLight.shadow.camera.right = 2
+    sunLight.shadow.camera.top = 2
+    sunLight.shadow.camera.bottom = -2
+    sunLight.shadow.bias = -0.001
+    scene.add(sunLight)
+
+    // Fill light (no shadow)
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.3)
+    fillLight.position.set(-1, 1, -1)
+    scene.add(fillLight)
+
+    // === Shadow-receiving ground plane (invisible but catches shadows) ===
+    const shadowPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(10, 10),
+      new THREE.ShadowMaterial({ opacity: 0.4 }) // Only shows shadows, otherwise transparent
+    )
+    shadowPlane.rotation.x = -Math.PI / 2
+    shadowPlane.position.y = 0
+    shadowPlane.receiveShadow = true
+    shadowPlane.visible = false // Hidden until model is placed
+    scene.add(shadowPlane)
+
+    // === Load FBX Model ===
     let model: any
     try {
       const loader = new FBXLoaderClass()
@@ -172,10 +196,20 @@ export default function ARPage() {
       const box = new THREE.Box3().setFromObject(fbx)
       const size = box.getSize(new THREE.Vector3())
       const maxDim = Math.max(size.x, size.y, size.z)
-      const scale = 0.5 / maxDim
+      const scale = 0.4 / maxDim
       fbx.scale.setScalar(scale)
-      const center = box.getCenter(new THREE.Vector3())
-      fbx.position.sub(center.multiplyScalar(scale))
+      // Position so bottom is at y=0 (sits on surface)
+      const newBox = new THREE.Box3().setFromObject(fbx)
+      fbx.position.y -= newBox.min.y
+
+      // Enable shadow casting on all meshes
+      fbx.traverse((child: any) => {
+        if (child.isMesh) {
+          child.castShadow = true
+          child.receiveShadow = true
+        }
+      })
+
       model = new THREE.Group()
       model.add(fbx)
     } catch (e) {
@@ -183,31 +217,29 @@ export default function ARPage() {
         new THREE.BoxGeometry(0.2, 0.2, 0.2),
         new THREE.MeshStandardMaterial({ color: 0x6366f1 })
       )
+      model.castShadow = true
+      model.position.y = 0.1
     }
 
-    // CRITICAL: Place model at ABSOLUTE world coordinates
-    // 'local-floor' reference space = origin at user's feet when session started
-    // Model placed 1.5m in front, 0.5m below eye level (roughly on the floor/table)
-    model.position.set(0, -0.3, -1.5)
+    model.visible = false
     scene.add(model)
 
-    // Ground shadow
-    const shadow = new THREE.Mesh(
-      new THREE.CircleGeometry(0.25, 32),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.08 })
+    // === Reticle (placement indicator) ===
+    const reticle = new THREE.Mesh(
+      new THREE.RingGeometry(0.08, 0.1, 32),
+      new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide })
     )
-    shadow.rotation.x = -Math.PI / 2
-    shadow.position.copy(model.position)
-    shadow.position.y -= 0.01
-    scene.add(shadow)
+    reticle.rotation.x = -Math.PI / 2
+    reticle.visible = false
+    scene.add(reticle)
 
-    // Start WebXR session
+    // === Start WebXR Session with hit-test ===
     const overlayEl = document.getElementById('ar-overlay')
     const sessionInit: any = {
-      requiredFeatures: ['local-floor'],
+      requiredFeatures: ['hit-test', 'local-floor'],
     }
     if (overlayEl) {
-      sessionInit.optionalFeatures = ['dom-overlay']
+      sessionInit.optionalFeatures = ['dom-overlay', 'depth-sensing']
       sessionInit.domOverlay = { root: overlayEl }
     }
 
@@ -216,22 +248,84 @@ export default function ARPage() {
       renderer.xr.setReferenceSpaceType('local-floor')
       await renderer.xr.setSession(session)
 
-      // Render loop - model is STATIC, no animation
-      // WebXR automatically updates camera position/rotation from ARCore
-      // Model stays at fixed world coordinates = does NOT move with phone
-      renderer.setAnimationLoop(() => {
+      // Get reference space for hit-test
+      const refSpace = await session.requestReferenceSpace('local-floor')
+      const viewerSpace = await session.requestReferenceSpace('viewer')
+      const hitTestSource = await session.requestHitTestSource!({ space: viewerSpace })
+
+      let modelPlaced = false
+
+      // Tap to place
+      session.addEventListener('select', () => {
+        if (modelPlaced) return
+        if (reticle.visible) {
+          // Place model at reticle position
+          model.position.copy(reticle.position)
+          model.visible = true
+
+          // Position shadow plane at same height
+          shadowPlane.position.y = reticle.position.y - 0.001
+          shadowPlane.position.x = reticle.position.x
+          shadowPlane.position.z = reticle.position.z
+          shadowPlane.visible = true
+
+          // Update shadow light to target model
+          sunLight.target = model
+          sunLight.position.set(
+            model.position.x + 0.5,
+            model.position.y + 3,
+            model.position.z + 1
+          )
+
+          reticle.visible = false
+          modelPlaced = true
+          setArState('placed')
+        }
+      })
+
+      // Render loop with hit-test
+      renderer.setAnimationLoop((timestamp: number, frame: any) => {
+        if (!modelPlaced && frame) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource)
+          if (hitTestResults.length > 0) {
+            const hit = hitTestResults[0]
+            const pose = hit.getPose(refSpace)
+            if (pose) {
+              reticle.visible = true
+              reticle.position.set(
+                pose.transform.position.x,
+                pose.transform.position.y,
+                pose.transform.position.z
+              )
+              reticle.quaternion.set(
+                pose.transform.orientation.x,
+                pose.transform.orientation.y,
+                pose.transform.orientation.z,
+                pose.transform.orientation.w
+              )
+            }
+          } else {
+            reticle.visible = false
+          }
+        }
+
         renderer.render(scene, camera)
       })
 
       session.addEventListener('end', () => {
         renderer.setAnimationLoop(null)
+        hitTestSource?.cancel()
       })
 
       sceneRef.current = {
-        stop: () => { try { session.end() } catch (e) {} renderer.dispose() }
+        stop: () => {
+          try { hitTestSource?.cancel() } catch (e) {}
+          try { session.end() } catch (e) {}
+          renderer.dispose()
+        }
       }
     } catch (err: any) {
-      setError('WebXR失败: ' + err.message)
+      setError('WebXR启动失败: ' + err.message)
       setArState('error')
     }
   }
@@ -279,10 +373,16 @@ export default function ARPage() {
           </div>
         )}
 
+        {arState === 'placing' && (
+          <div className="ar-placing-hint">
+            <span>对准平面 · 点击屏幕放置模型</span>
+          </div>
+        )}
+
         <div className="ar-topbar">
           <div className="ar-back-btn" onClick={goBack}>←</div>
           {arState === 'placed' && (
-            <div className="ar-locked-badge">空间追踪中 · 自由走动环绕</div>
+            <div className="ar-locked-badge">已放置 · 自由走动环绕查看</div>
           )}
         </div>
 

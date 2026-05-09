@@ -153,3 +153,16 @@
   padding: 10px 24px; background: #6366f1; color: #fff;
   border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
 }
+
+/* Placing hint */
+.ar-placing-hint {
+  position: fixed;
+  bottom: 100px; left: 50%; transform: translateX(-50%);
+  z-index: 100;
+  padding: 10px 20px; border-radius: 16px;
+  background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+  color: #fff; font-size: 13px; font-weight: 500;
+  white-space: nowrap;
+  animation: fadeIn 0.3s ease;
+}
+@keyframes fadeIn { from { opacity:0; } to { opacity:1; } }

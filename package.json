@@ -1,6 +1,6 @@
 {
   "name": "web-ar",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "WebAR App with Image Tracking and 360 Viewer",
   "templateInfo": {
