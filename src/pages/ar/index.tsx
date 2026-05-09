@@ -310,7 +310,7 @@ export default function ARPage() {
     const overlayEl = document.getElementById('ar-overlay')
     const sessionInit: any = {
       requiredFeatures: ['hit-test', 'local-floor'],
-      optionalFeatures: ['dom-overlay', 'depth-sensing'],
+      optionalFeatures: ['dom-overlay', 'depth-sensing', 'anchors'],
       depthSensing: {
         usagePreference: ['cpu-optimized'],
         dataFormatPreference: ['luminance-alpha', 'float32']
@@ -334,42 +334,100 @@ export default function ARPage() {
       renderer.xr.setReferenceSpaceType('local-floor')
       await renderer.xr.setSession(session)
 
-      const refSpace = await session.requestReferenceSpace('local-floor')
+      // Use viewer space for hit-test ray (center of screen)
       const viewerSpace = await session.requestReferenceSpace('viewer')
       const hitTestSource = await (session as any).requestHitTestSource!({ space: viewerSpace })
 
       let modelPlaced = false
-      let hitCount = 0 // Track stable hits before auto-placing
+      let hitCount = 0
+      let xrAnchor: any = null // XR Anchor for persistent tracking
 
-      // === Auto-place logic ===
-      const placeAt = (x: number, y: number, z: number) => {
+      // === Auto-place with XR Anchor ===
+      const placeWithAnchor = async (hitResult: any, frame: any) => {
         if (modelPlaced) return
-        model.position.set(x, y, z)
-        model.visible = true
         modelPlaced = true
         setArState('placed')
-        console.log('[WebXR] Auto-placed at:', x.toFixed(2), y.toFixed(2), z.toFixed(2))
+
+        // Get Three.js's internal reference space (same coord system as rendering)
+        const threeRefSpace = renderer.xr.getReferenceSpace()
+        const pose = hitResult.getPose(threeRefSpace)
+
+        if (pose) {
+          model.position.set(
+            pose.transform.position.x,
+            pose.transform.position.y,
+            pose.transform.position.z
+          )
+          model.quaternion.set(
+            pose.transform.orientation.x,
+            pose.transform.orientation.y,
+            pose.transform.orientation.z,
+            pose.transform.orientation.w
+          )
+        }
+        model.visible = true
+
+        // Create XR Anchor for persistent world-locked tracking
+        try {
+          if (hitResult.createAnchor) {
+            xrAnchor = await hitResult.createAnchor()
+            console.log('[WebXR] XR Anchor created from hit-test!')
+          } else if (frame.createAnchor && pose) {
+            xrAnchor = await frame.createAnchor(pose.transform, threeRefSpace)
+            console.log('[WebXR] XR Anchor created from frame!')
+          }
+        } catch (e) {
+          console.warn('[WebXR] Anchor creation failed, using static position')
+        }
+
+        console.log('[WebXR] Model placed, anchor:', !!xrAnchor)
       }
 
-      // Timeout: if no surface found in 5s, place at default position
+      // Fallback: place at default position if no surface found
       const fallbackTimer = setTimeout(() => {
         if (!modelPlaced) {
-          console.log('[WebXR] Timeout - placing at default position')
-          // Default: 1.5m in front, 1m below eye level (approximate floor)
-          placeAt(0, -1.0, -1.5)
+          modelPlaced = true
+          setArState('placed')
+          // Place 1.5m in front, at approximate floor level
+          model.position.set(0, -1.0, -1.5)
+          model.visible = true
+          console.log('[WebXR] Fallback placement (no surface found)')
         }
       }, 5000)
 
-      // Render loop with auto-place on first stable hit
+      // === Render Loop ===
       renderer.setAnimationLoop((timestamp: number, frame: any) => {
         if (!frame) { renderer.render(scene, camera); return }
 
-        // Depth occlusion (after placement)
-        if (depthEnabled && modelPlaced) {
+        // Get Three.js's reference space each frame (guaranteed correct coord system)
+        const threeRefSpace = renderer.xr.getReferenceSpace()
+
+        // --- Update model position from XR Anchor (if available) ---
+        if (xrAnchor && threeRefSpace) {
           try {
-            const pose = frame.getViewerPose(refSpace)
-            if (pose && pose.views.length > 0) {
-              const depthInfo = frame.getDepthInformation(pose.views[0])
+            const anchorPose = frame.getPose(xrAnchor.anchorSpace, threeRefSpace)
+            if (anchorPose) {
+              model.position.set(
+                anchorPose.transform.position.x,
+                anchorPose.transform.position.y,
+                anchorPose.transform.position.z
+              )
+              model.quaternion.set(
+                anchorPose.transform.orientation.x,
+                anchorPose.transform.orientation.y,
+                anchorPose.transform.orientation.z,
+                anchorPose.transform.orientation.w
+              )
+            }
+          } catch (e) { /* anchor pose unavailable this frame */ }
+        }
+
+        // --- Depth occlusion ---
+        if (depthEnabled && modelPlaced && threeRefSpace) {
+          try {
+            const viewerPose = frame.getViewerPose(threeRefSpace)
+            if (viewerPose && viewerPose.views.length > 0) {
+              const depthInfo = frame.getDepthInformation(viewerPose.views[0])
               if (depthInfo) {
                 updateDepthOcclusion(THREE, depthInfo, depthOcclusionMaterial, occlusionQuad)
               }
@@ -377,24 +435,16 @@ export default function ARPage() {
           } catch (e) { /* skip */ }
         }
 
-        // Auto-place on first stable hit-test result
+        // --- Auto-place on first stable hit ---
         if (!modelPlaced) {
           try {
             const hits = frame.getHitTestResults(hitTestSource)
             if (hits.length > 0) {
-              const pose = hits[0].getPose(refSpace)
-              if (pose) {
-                hitCount++
-                // Wait for 3 consecutive frames with hits for stability
-                if (hitCount >= 3) {
-                  clearTimeout(fallbackTimer)
-                  placeAt(
-                    pose.transform.position.x,
-                    pose.transform.position.y,
-                    pose.transform.position.z
-                  )
-                  try { hitTestSource.cancel() } catch (e) {}
-                }
+              hitCount++
+              if (hitCount >= 3) {
+                clearTimeout(fallbackTimer)
+                placeWithAnchor(hits[0], frame)
+                try { hitTestSource.cancel() } catch (e) {}
               }
             }
           } catch (e) { /* skip */ }
@@ -407,12 +457,14 @@ export default function ARPage() {
         renderer.setAnimationLoop(null)
         clearTimeout(fallbackTimer)
         try { hitTestSource?.cancel() } catch (e) {}
+        if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
       })
 
       sceneRef.current = {
         stop: () => {
           clearTimeout(fallbackTimer)
           try { hitTestSource?.cancel() } catch (e) {}
+          if (xrAnchor) { try { xrAnchor.delete() } catch (e) {} }
           try { session.end() } catch (e) {}
           renderer.dispose()
         }
