@@ -255,14 +255,7 @@ export default function ARPage() {
     model.visible = false
     scene.add(model)
 
-    // === Reticle ===
-    const reticle = new THREE.Mesh(
-      new THREE.RingGeometry(0.08, 0.1, 32),
-      new THREE.MeshBasicMaterial({ color: 0x22c55e, side: THREE.DoubleSide })
-    )
-    reticle.rotation.x = -Math.PI / 2
-    reticle.visible = false
-    scene.add(reticle)
+    // No reticle needed - auto-place
 
     // === Depth Occlusion Shader ===
     const depthOcclusionMaterial = new THREE.ShaderMaterial({
@@ -346,24 +339,32 @@ export default function ARPage() {
       const hitTestSource = await (session as any).requestHitTestSource!({ space: viewerSpace })
 
       let modelPlaced = false
+      let hitCount = 0 // Track stable hits before auto-placing
 
-      session.addEventListener('select', () => {
+      // === Auto-place logic ===
+      const placeAt = (x: number, y: number, z: number) => {
         if (modelPlaced) return
-        if (reticle.visible) {
-          model.position.copy(reticle.position)
-          model.visible = true
-          reticle.visible = false
-          modelPlaced = true
-          setArState('placed')
-          console.log('[WebXR] Placed at:', model.position.toArray())
-        }
-      })
+        model.position.set(x, y, z)
+        model.visible = true
+        modelPlaced = true
+        setArState('placed')
+        console.log('[WebXR] Auto-placed at:', x.toFixed(2), y.toFixed(2), z.toFixed(2))
+      }
 
-      // Render loop
+      // Timeout: if no surface found in 5s, place at default position
+      const fallbackTimer = setTimeout(() => {
+        if (!modelPlaced) {
+          console.log('[WebXR] Timeout - placing at default position')
+          // Default: 1.5m in front, 1m below eye level (approximate floor)
+          placeAt(0, -1.0, -1.5)
+        }
+      }, 5000)
+
+      // Render loop with auto-place on first stable hit
       renderer.setAnimationLoop((timestamp: number, frame: any) => {
         if (!frame) { renderer.render(scene, camera); return }
 
-        // Depth occlusion
+        // Depth occlusion (after placement)
         if (depthEnabled && modelPlaced) {
           try {
             const pose = frame.getViewerPose(refSpace)
@@ -376,28 +377,25 @@ export default function ARPage() {
           } catch (e) { /* skip */ }
         }
 
-        // Hit-test
+        // Auto-place on first stable hit-test result
         if (!modelPlaced) {
           try {
             const hits = frame.getHitTestResults(hitTestSource)
             if (hits.length > 0) {
               const pose = hits[0].getPose(refSpace)
               if (pose) {
-                reticle.visible = true
-                reticle.position.set(
-                  pose.transform.position.x,
-                  pose.transform.position.y,
-                  pose.transform.position.z
-                )
-                reticle.quaternion.set(
-                  pose.transform.orientation.x,
-                  pose.transform.orientation.y,
-                  pose.transform.orientation.z,
-                  pose.transform.orientation.w
-                )
+                hitCount++
+                // Wait for 3 consecutive frames with hits for stability
+                if (hitCount >= 3) {
+                  clearTimeout(fallbackTimer)
+                  placeAt(
+                    pose.transform.position.x,
+                    pose.transform.position.y,
+                    pose.transform.position.z
+                  )
+                  try { hitTestSource.cancel() } catch (e) {}
+                }
               }
-            } else {
-              reticle.visible = false
             }
           } catch (e) { /* skip */ }
         }
@@ -407,11 +405,13 @@ export default function ARPage() {
 
       session.addEventListener('end', () => {
         renderer.setAnimationLoop(null)
+        clearTimeout(fallbackTimer)
         try { hitTestSource?.cancel() } catch (e) {}
       })
 
       sceneRef.current = {
         stop: () => {
+          clearTimeout(fallbackTimer)
           try { hitTestSource?.cancel() } catch (e) {}
           try { session.end() } catch (e) {}
           renderer.dispose()
@@ -497,14 +497,15 @@ export default function ARPage() {
 
         {arState === 'placing' && (
           <div className="ar-placing-hint">
-            <span>缓慢移动手机扫描地面 · 点击放置模型</span>
+            <div className="ar-loading-spinner" style={{ width: '20px', height: '20px', marginBottom: '8px' }} />
+            <span>正在检测环境，请缓慢移动手机...</span>
           </div>
         )}
 
         <div className="ar-topbar">
           <div className="ar-back-btn" onClick={goBack}>←</div>
           {arState === 'placed' && (
-            <div className="ar-locked-badge">已锚定 · 深度遮挡</div>
+            <div className="ar-locked-badge">已锚定 · 自由走动查看</div>
           )}
         </div>
 
