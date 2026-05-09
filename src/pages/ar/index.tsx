@@ -25,8 +25,8 @@ export default function ARPage() {
         const THREE = await import('three')
         setProgress(40)
 
-        // Import MindAR (installed via npm --ignore-scripts)
-        const mindArModule = await import('mind-ar/dist/mindar-image-three.prod.js')
+        // Import MindAR from local lib (no CDN dependency)
+        const mindArModule = await import('../../lib/mindar/mindar-image-three.prod.js')
         const MindARThree = mindArModule.MindARThree
         if (!MindARThree) {
           throw new Error('MindAR library failed to load')

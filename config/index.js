@@ -26,7 +26,20 @@ const config = {
   h5: {
     publicPath: './',
     staticDirectory: 'static',
-    esnextModules: ['mind-ar', 'three'],
+    esnextModules: ['three'],
+    webpackChain(chain) {
+      chain.resolve.set('fallback', {
+        util: false,
+        fs: false,
+        path: false,
+        crypto: false,
+        stream: false,
+        buffer: false,
+        worker_threads: false,
+        'node-fetch': false,
+        'string_decoder': false
+      })
+    },
     postcss: {
       autoprefixer: {
         enable: true,
