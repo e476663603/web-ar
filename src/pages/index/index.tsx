@@ -2,6 +2,8 @@ import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import './index.scss'
 
+const APP_VERSION = '1.0.4'
+
 export default function Index() {
   const goToAR = () => {
     Taro.navigateTo({ url: '/pages/ar/index' })
@@ -45,7 +47,7 @@ export default function Index() {
         </View>
       </View>
       <View className="home-footer">
-        <Text>Powered by MindAR + Three.js</Text>
+        <Text>Powered by MindAR + Three.js · v{APP_VERSION}</Text>
       </View>
     </View>
   )
