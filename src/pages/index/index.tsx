@@ -12,8 +12,8 @@ export default function Index() {
   }
 
   const openTargetImage = () => {
-    // Open the target image in a new window for the user to print/display
-    window.open('https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/examples/image-tracking/assets/card-example/card.png', '_blank')
+    // Try local asset first, fallback to unpkg
+    window.open('./assets/ar/target.png', '_blank')
   }
 
   return (

@@ -37,7 +37,7 @@ export default function ARPage() {
         // Initialize MindAR
         const mindarThree = new MindARThree({
           container: containerRef.current,
-          imageTargetSrc: 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/examples/image-tracking/assets/card-example/card.mind',
+          imageTargetSrc: 'https://unpkg.com/mind-ar@1.2.5/examples/image-tracking/assets/card-example/card.mind',
           uiLoading: 'no',
           uiScanning: 'no',
           uiError: 'no',

@@ -13,7 +13,9 @@ const config = {
   plugins: [],
   defineConstants: {},
   copy: {
-    patterns: [],
+    patterns: [
+      { from: 'src/assets/ar/', to: 'dist/assets/ar/' }
+    ],
     options: {}
   },
   framework: 'react',
