@@ -210,11 +210,34 @@
   text-align: center;
 }
 
-.error-icon { font-size: 36px; margin-bottom: 12px; }
+.error-icon { font-size: 36px; margin-bottom: 12px; color: #f59e0b; }
 .error-text { color: rgba(255,255,255,0.7); font-size: 13px; line-height: 1.6; margin-bottom: 18px; }
 .error-btn {
   padding: 10px 24px;
   background: #6366f1; color: #fff;
   border-radius: 10px; font-size: 13px; font-weight: 600;
   cursor: pointer;
+}
+
+/* Detected hint */
+.ar-detected-hint {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 16px) + 56px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  padding: 8px 16px;
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.85);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  animation: fadeInDown 0.3s ease;
+}
+
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }

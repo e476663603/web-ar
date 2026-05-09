@@ -1,4 +1,3 @@
-import { View, Text } from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import { useEffect, useRef, useState } from 'react'
 import './index.scss'
@@ -46,8 +45,8 @@ export default function ARPage() {
           uiLoading: 'no',
           uiScanning: 'no',
           uiError: 'no',
-          filterMinCF: 0.001,
-          filterBeta: 0.01,
+          filterMinCF: 0.0001,
+          filterBeta: 0.001,
         })
 
         mindarRef.current = mindarThree
@@ -60,7 +59,7 @@ export default function ARPage() {
         scene.add(dirLight)
         scene.add(new THREE.PointLight(0x8b5cf6, 1, 10))
 
-        // 3D Model
+        // 3D Model - attached to anchor, visible immediately on detection
         const anchor = mindarThree.addAnchor(0)
         const modelGroup = createModel(THREE)
         modelGroupRef.current = modelGroup
@@ -75,8 +74,8 @@ export default function ARPage() {
         }
         anchor.onTargetLost = () => {
           if (!isMounted) return
-          if (modelGroup.userData.locked) return
-          modelGroup.visible = false
+          // Keep model visible even when target lost - user can preview position
+          // Model stays visible so user can see where it will lock
           setArState(prev => prev === 'detected' ? 'scanning' : prev)
         }
 
@@ -115,7 +114,7 @@ export default function ARPage() {
     }
   }, [])
 
-  // Lock: stop MindAR → switch to gyro-tracked camera with model fixed in space
+  // Lock: stop MindAR -> switch to gyro-tracked camera with model fixed in space
   const lockModel = async () => {
     setArState('locked')
     try {
@@ -131,7 +130,7 @@ export default function ARPage() {
     }
   }
 
-  // Gyro-tracked scene: model fixed in space, camera moves with phone
+  // Gyro-tracked scene with heavy smoothing for stability
   const startLockedScene = async (THREE: any, container: HTMLElement) => {
     const w = window.innerWidth
     const h = window.innerHeight
@@ -145,68 +144,102 @@ export default function ARPage() {
     video.setAttribute('playsinline', 'true')
     video.setAttribute('autoplay', 'true')
     video.muted = true
-    video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;'
+    video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:1;'
     container.appendChild(video)
     await video.play()
 
     // Three.js transparent overlay
     const scene = new THREE.Scene()
-    const camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 1000)
+    const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 1000)
     camera.position.set(0, 0, 0)
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
     renderer.setSize(w, h)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-    renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;'
+    renderer.domElement.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:2;'
     container.appendChild(renderer.domElement)
 
     // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.7))
-    const dl = new THREE.DirectionalLight(0xffffff, 0.9)
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8))
+    const dl = new THREE.DirectionalLight(0xffffff, 1.0)
     dl.position.set(1, 2, 1)
     scene.add(dl)
-    scene.add(new THREE.PointLight(0x8b5cf6, 0.6, 10))
+    const pl = new THREE.PointLight(0x8b5cf6, 0.8, 10)
+    pl.position.set(0, 0, -1.5)
+    scene.add(pl)
 
-    // Model at fixed world position
+    // Model at fixed world position (in front of user)
     const model = createModel(THREE)
     model.visible = true
-    model.position.set(0, 0, -2)
+    model.position.set(0, 0, -2.5)
     scene.add(model)
 
-    // Device orientation tracking
-    let alpha = 0, beta = 0, gamma = 0, initialAlpha: number | null = null
+    // === Gyroscope with heavy smoothing ===
+    // Raw values from sensor
+    let rawAlpha = 0, rawBeta = 0, rawGamma = 0
+    // Smoothed values (low-pass filtered)
+    let smoothAlpha = 0, smoothBeta = 0, smoothGamma = 0
+    let initialAlpha: number | null = null
+    let hasOrientation = false
+    // Smoothing factor: lower = smoother but more lag (0.03-0.08 is stable)
+    const SMOOTH_FACTOR = 0.05
+    // Target quaternion and current quaternion for slerp
+    const targetQuat = new THREE.Quaternion()
+    const currentQuat = new THREE.Quaternion()
+    // Slerp factor: lower = smoother (0.02-0.08 for stability)
+    const SLERP_FACTOR = 0.04
 
     const onOrientation = (e: DeviceOrientationEvent) => {
-      alpha = e.alpha || 0
-      beta = e.beta || 0
-      gamma = e.gamma || 0
+      if (e.alpha !== null) {
+        rawAlpha = e.alpha
+        rawBeta = e.beta || 0
+        rawGamma = e.gamma || 0
+        hasOrientation = true
+      }
     }
 
-    // Request permission (iOS)
+    // Request permission (iOS 13+)
     if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
       try {
         const perm = await (DeviceOrientationEvent as any).requestPermission()
-        if (perm === 'granted') window.addEventListener('deviceorientation', onOrientation)
-      } catch (e) { /* no gyro fallback */ }
+        if (perm === 'granted') window.addEventListener('deviceorientation', onOrientation, true)
+      } catch (e) { console.warn('Gyro permission denied') }
     } else {
-      window.addEventListener('deviceorientation', onOrientation)
+      window.addEventListener('deviceorientation', onOrientation, true)
     }
 
     const clock = new THREE.Clock()
     let animId = 0
+
     const animate = () => {
       const t = clock.getElapsedTime()
-      animateModel(model, t)
 
-      // Capture initial orientation so model starts in front of user
-      if (initialAlpha === null && alpha !== 0) initialAlpha = alpha
+      if (hasOrientation) {
+        // Capture initial alpha so model appears in front
+        if (initialAlpha === null) initialAlpha = rawAlpha
 
-      // Convert device orientation to camera quaternion
-      const a = THREE.MathUtils.degToRad(alpha - (initialAlpha || 0))
-      const b = THREE.MathUtils.degToRad(beta - 90)
-      const g = THREE.MathUtils.degToRad(-gamma)
+        // Low-pass filter on raw values
+        smoothAlpha += angleDiff(smoothAlpha, rawAlpha) * SMOOTH_FACTOR
+        smoothBeta += (rawBeta - smoothBeta) * SMOOTH_FACTOR
+        smoothGamma += (rawGamma - smoothGamma) * SMOOTH_FACTOR
 
-      camera.quaternion.setFromEuler(new THREE.Euler(b, a, g, 'YXZ'))
+        // Convert to radians (relative to initial orientation)
+        const alphaRad = THREE.MathUtils.degToRad(smoothAlpha - initialAlpha)
+        const betaRad = THREE.MathUtils.degToRad(smoothBeta - 90)
+        const gammaRad = THREE.MathUtils.degToRad(-smoothGamma)
+
+        // Set target quaternion from euler
+        const euler = new THREE.Euler(betaRad, alphaRad, gammaRad, 'YXZ')
+        targetQuat.setFromEuler(euler)
+
+        // Slerp current -> target for ultra-smooth movement
+        currentQuat.slerp(targetQuat, SLERP_FACTOR)
+        camera.quaternion.copy(currentQuat)
+      }
+
+      // Gentle floating animation (very subtle, not rotation)
+      const floatY = Math.sin(t * 0.8) * 0.02
+      model.position.y = floatY
 
       renderer.render(scene, camera)
       animId = requestAnimationFrame(animate)
@@ -216,7 +249,7 @@ export default function ARPage() {
     lockedSceneRef.current = {
       cleanup: () => {
         cancelAnimationFrame(animId)
-        window.removeEventListener('deviceorientation', onOrientation)
+        window.removeEventListener('deviceorientation', onOrientation, true)
         stream.getTracks().forEach(t => t.stop())
         renderer.dispose()
       }
@@ -267,9 +300,15 @@ export default function ARPage() {
         </div>
       )}
 
+      {arState === 'detected' && (
+        <div className="ar-detected-hint">
+          <span>模型已加载 · 调整位置后点击下方固定</span>
+        </div>
+      )}
+
       <div className="ar-topbar">
         <div className="ar-back-btn" onClick={goBack}>←</div>
-        {arState === 'locked' && <div className="ar-locked-badge">✓ 已固定 · 移动手机环绕查看</div>}
+        {arState === 'locked' && <div className="ar-locked-badge">已固定 · 移动手机环绕查看</div>}
       </div>
 
       <div className="ar-bottom">
@@ -285,7 +324,7 @@ export default function ARPage() {
           </div>
         )}
         {arState === 'detected' && (
-          <div className="lock-btn" onClick={lockModel}><span>✓ 固定在此位置</span></div>
+          <div className="lock-btn" onClick={lockModel}><span>固定在此位置</span></div>
         )}
         {arState === 'locked' && (
           <div className="rescan-btn" onClick={rescan}><span>重新扫描</span></div>
@@ -294,7 +333,7 @@ export default function ARPage() {
 
       {arState === 'error' && (
         <div className="ar-error">
-          <span className="error-icon">⚠️</span>
+          <span className="error-icon">!</span>
           <span className="error-text">{error}</span>
           <div className="error-btn" onClick={goBack}>返回首页</div>
         </div>
@@ -303,19 +342,57 @@ export default function ARPage() {
   )
 }
 
+// Helper: compute shortest angular difference (handles 0/360 wrap)
+function angleDiff(current: number, target: number): number {
+  let diff = target - current
+  while (diff > 180) diff -= 360
+  while (diff < -180) diff += 360
+  return diff
+}
+
 function createModel(THREE: any) {
   const group = new THREE.Group()
-  const ico = new THREE.Mesh(new THREE.IcosahedronGeometry(0.3, 1), new THREE.MeshPhysicalMaterial({ color: 0x6366f1, metalness: 0.3, roughness: 0.2, clearcoat: 1.0 }))
-  ico.name = 'ico'; group.add(ico)
+  // Main icosahedron
+  const ico = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(0.3, 1),
+    new THREE.MeshPhysicalMaterial({
+      color: 0x6366f1, metalness: 0.3, roughness: 0.2, clearcoat: 1.0
+    })
+  )
+  ico.name = 'ico'
+  group.add(ico)
+
+  // Rings
   const ringGeo = new THREE.TorusGeometry(0.45, 0.015, 16, 64)
-  const ringMat = new THREE.MeshPhysicalMaterial({ color: 0x8b5cf6, metalness: 0.8, roughness: 0.1, emissive: 0x4f46e5, emissiveIntensity: 0.3 })
-  const r1 = new THREE.Mesh(ringGeo, ringMat); r1.rotation.x = Math.PI/3; r1.name = 'ring1'; group.add(r1)
-  const r2 = new THREE.Mesh(ringGeo, ringMat.clone()); r2.rotation.x = -Math.PI/3; r2.rotation.y = Math.PI/4; r2.name = 'ring2'; group.add(r2)
-  const r3 = new THREE.Mesh(ringGeo, ringMat.clone()); r3.rotation.z = Math.PI/2; r3.name = 'ring3'; group.add(r3)
-  const pos = new Float32Array(30*3)
-  for(let i=0;i<30;i++){const t=Math.random()*Math.PI*2,p=Math.random()*Math.PI,r=0.5+Math.random()*0.3;pos[i*3]=r*Math.sin(p)*Math.cos(t);pos[i*3+1]=r*Math.sin(p)*Math.sin(t);pos[i*3+2]=r*Math.cos(p)}
-  const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.BufferAttribute(pos,3))
-  const pts = new THREE.Points(pg, new THREE.PointsMaterial({color:0xa78bfa,size:0.02,transparent:true,opacity:0.8})); pts.name='particles'; group.add(pts)
+  const ringMat = new THREE.MeshPhysicalMaterial({
+    color: 0x8b5cf6, metalness: 0.8, roughness: 0.1,
+    emissive: 0x4f46e5, emissiveIntensity: 0.3
+  })
+  const r1 = new THREE.Mesh(ringGeo, ringMat)
+  r1.rotation.x = Math.PI / 3; r1.name = 'ring1'; group.add(r1)
+  const r2 = new THREE.Mesh(ringGeo, ringMat.clone())
+  r2.rotation.x = -Math.PI / 3; r2.rotation.y = Math.PI / 4; r2.name = 'ring2'; group.add(r2)
+  const r3 = new THREE.Mesh(ringGeo, ringMat.clone())
+  r3.rotation.z = Math.PI / 2; r3.name = 'ring3'; group.add(r3)
+
+  // Particles
+  const pos = new Float32Array(30 * 3)
+  for (let i = 0; i < 30; i++) {
+    const t = Math.random() * Math.PI * 2
+    const p = Math.random() * Math.PI
+    const r = 0.5 + Math.random() * 0.3
+    pos[i * 3] = r * Math.sin(p) * Math.cos(t)
+    pos[i * 3 + 1] = r * Math.sin(p) * Math.sin(t)
+    pos[i * 3 + 2] = r * Math.cos(p)
+  }
+  const pg = new THREE.BufferGeometry()
+  pg.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  const pts = new THREE.Points(pg, new THREE.PointsMaterial({
+    color: 0xa78bfa, size: 0.02, transparent: true, opacity: 0.8
+  }))
+  pts.name = 'particles'
+  group.add(pts)
+
   return group
 }
 
@@ -325,7 +402,14 @@ function animateModel(group: any, t: number) {
   const r2 = group.getObjectByName('ring2')
   const r3 = group.getObjectByName('ring3')
   const pts = group.getObjectByName('particles')
-  if(ico){ico.rotation.y=t*0.5;ico.rotation.x=Math.sin(t*0.3)*0.2;const s=1+Math.sin(t*2)*0.05;ico.scale.set(s,s,s)}
-  if(r1)r1.rotation.z=t*0.8;if(r2)r2.rotation.z=-t*0.6;if(r3)r3.rotation.x=t*0.4
-  if(pts)pts.rotation.y=t*0.2
+  if (ico) {
+    ico.rotation.y = t * 0.5
+    ico.rotation.x = Math.sin(t * 0.3) * 0.2
+    const s = 1 + Math.sin(t * 2) * 0.05
+    ico.scale.set(s, s, s)
+  }
+  if (r1) r1.rotation.z = t * 0.8
+  if (r2) r2.rotation.z = -t * 0.6
+  if (r3) r3.rotation.x = t * 0.4
+  if (pts) pts.rotation.y = t * 0.2
 }
