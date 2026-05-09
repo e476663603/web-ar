@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from 'react'
 import './index.scss'
 
 export default function ARPage() {
-  const containerRef = useRef<HTMLDivElement>(null)
   const mindarRef = useRef<any>(null)
   const [loading, setLoading] = useState(true)
   const [progress, setProgress] = useState(0)
@@ -17,7 +16,17 @@ export default function ARPage() {
 
     const initAR = async () => {
       try {
-        if (!containerRef.current) return
+        // Use real DOM element directly - Taro View doesn't give standard div
+        const container = document.getElementById('ar-container')
+        if (!container) {
+          throw new Error('AR container not found')
+        }
+
+        // Ensure container has dimensions
+        container.style.width = '100vw'
+        container.style.height = '100vh'
+        container.style.position = 'relative'
+        container.style.overflow = 'hidden'
 
         setProgress(20)
 
@@ -37,7 +46,7 @@ export default function ARPage() {
 
         // Initialize MindAR
         const mindarThree = new MindARThree({
-          container: containerRef.current,
+          container: container,
           imageTargetSrc: './assets/ar/card.mind',
           uiLoading: 'no',
           uiScanning: 'no',
@@ -176,7 +185,8 @@ export default function ARPage() {
       }
     }
 
-    initAR()
+    // Small delay to ensure DOM is rendered
+    setTimeout(() => initAR(), 100)
 
     return () => {
       isMounted = false
@@ -196,11 +206,7 @@ export default function ARPage() {
 
   return (
     <View className="ar-page">
-      <View
-        className="ar-container"
-        ref={containerRef as any}
-        id="ar-container"
-      />
+      <div id="ar-container" className="ar-container" />
 
       {/* Overlay UI */}
       <View className="ar-overlay">

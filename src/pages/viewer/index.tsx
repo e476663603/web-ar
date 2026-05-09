@@ -17,14 +17,14 @@ export default function ViewerPage() {
 
     const initViewer = async () => {
       try {
-        if (!canvasRef.current) return
+        const container = document.getElementById('viewer-canvas') as HTMLElement
+        if (!container) return
 
         const THREE = await import('three')
         const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js')
 
         if (!isMounted) return
 
-        const container = canvasRef.current as HTMLElement
         const width = container.clientWidth
         const height = container.clientHeight
 
@@ -293,7 +293,7 @@ export default function ViewerPage() {
 
   return (
     <View className="viewer-page">
-      <View className="viewer-canvas" ref={canvasRef as any} id="viewer-canvas" />
+      <div className="viewer-canvas" id="viewer-canvas" />
 
       {/* Overlay */}
       <View className="viewer-overlay">
